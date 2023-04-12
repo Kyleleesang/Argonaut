@@ -33,7 +33,8 @@ impl Hashable for Content{
 		bytes[34..66].copy_from_slice(&root[..]);
 		//hash the byte array
 		let hash = Blake3::hash(&bytes);
-		H256::from_slice(&hash.as_bytes())
+		 let returnHash = H256::from_slice(&hash.as_bytes());
+		returnHash
 	}
 }
 

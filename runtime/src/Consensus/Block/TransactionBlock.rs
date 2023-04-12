@@ -1,7 +1,6 @@
 use sp_core::H256;
-use super::Block;
-//import extrinsics
-use sp_runtime::traits::Extrinsic;
+use sp_runtime::traits::{Extrinsic, Block, Hash};
+
 
 #[derive(Serialize, Deserialize, Clone, Copy, Hash, Default)]
 pub struct Content{
@@ -15,6 +14,18 @@ impl Content{
 		Content {
 			extrinsics
 		}
+	}
+}
+
+impl Block for Content {
+	//type of the hash
+	type Hash = H256;
+	//type of the extrinsic
+	type Extrinsic = Extrinsic;
+	type Header = Header;
+	//create a function to return the extrinsics
+	fn extrinsics(&self) -> &[Self::Extrinsic] {
+		&self.extrinsics
 	}
 }
 
