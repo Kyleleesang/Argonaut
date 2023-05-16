@@ -1,7 +1,8 @@
 
 use frame_support::storage::*;
-use Blake3::*;
+use multihash::Blake3Hasher;
 use sp_blockchain::{HeaderBackend, Backend};
+use sp_runtime::traits::{Block as BlockT, BlakeTwo256, Hash, Zero};
 
 
 // Column family names for node/chain metadata
@@ -17,7 +18,6 @@ const PROPOSER_LEDGER_ORDER_CF: &str = "PROPOSER_LEDGER_ORDER"; // level (u64) t
 // by this level, including the leader itself. The list
 // is in the order that those blocks should live in the ledger.
 const PROPOSER_VOTE_COUNT_CF: &str = "PROPOSER_VOTE_COUNT"; // number of all votes on a block
-
 // Column family names for graph neighbors
 const PARENT_NEIGHBOR_CF: &str = "GRAPH_PARENT_NEIGHBOR"; // the proposer parent of a block
 const VOTE_NEIGHBOR_CF: &str = "GRAPH_VOTE_NEIGHBOR"; // neighbors associated by a vote
@@ -98,3 +98,4 @@ impl Backend for BlockTree{
 	}
 
 }
+
