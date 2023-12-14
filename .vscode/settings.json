@@ -1,0 +1,10 @@
+{
+    "rust-analyzer.linkedProjects": [
+        "./runtime/Cargo.toml",
+        "./runtime/Cargo.toml",
+        "./runtime/Cargo.toml",
+        "./runtime/Cargo.toml",
+        "./runtime/Cargo.toml",
+        "./runtime/Cargo.toml"
+    ]
+}

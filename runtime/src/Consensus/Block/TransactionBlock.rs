@@ -1,6 +1,12 @@
 use sp_core::H256;
 use sp_runtime::traits::{Extrinsic, Block, Hash};
 
+pub struct TransactionBlock{
+	Content: Content,
+	Header: Header,
+	MerkleRoot: H256,
+	TransactionRoot: H256,
+}
 
 #[derive(Serialize, Deserialize, Clone, Copy, Hash, Default)]
 pub struct Content{
@@ -17,7 +23,7 @@ impl Content{
 	}
 }
 
-impl Block for Content {
+impl Block for TransactionBlock {
 	//type of the hash
 	type Hash = H256;
 	//type of the extrinsic
@@ -26,6 +32,18 @@ impl Block for Content {
 	//create a function to return the extrinsics
 	fn extrinsics(&self) -> &[Self::Extrinsic] {
 		&self.extrinsics
+	}
+	fn header(&self) -> &Self::Header {
+		&self.Header
+	}
+	fn deconstruct(self) -> (Self::Header, Vec<Self::Extrinsic>) {
+		(self.Header, self.extrinsics)
+	}
+
+	fn new(header: Self::Header, extrinsics: Vec<Self::Extrinsic>) -> Self {
+		Content {
+			extrinsics,
+		}
 	}
 }
 
