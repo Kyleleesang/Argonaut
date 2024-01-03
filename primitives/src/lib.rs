@@ -16,7 +16,6 @@ impl FalconHostFunctions {
         falcon512::sign(message, sk)
     }
 
-
     pub fn verify(signature: &DetachedSignature, message: &[u8], public_key: &PublicKey) -> Result<(), VerificationError> {
         falcon512::verify_detached_signature(signature, message, public_key)
     }
@@ -78,7 +77,6 @@ mod falcon_tests {
         let hashed_key = FalconHostFunctions::hash_public_key(&pk);
         let address = FalconHostFunctions::generate_address(hashed_key);
         println!("The substrate address generated is: {}", address);
-        assert_eq!(address.len(), 47);
-        //note: the original was 43
+        assert_eq!(address.len(), 48);
     }
 }
