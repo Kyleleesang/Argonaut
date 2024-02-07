@@ -8,6 +8,7 @@ use sp_api::ProvideRuntimeApi;
 use sp_blockchain::HeaderBackend;
 use sp_consensus::{Error, BlockOrigin, SelectChain, Environment, Proposer};
 use sc_consensus_pow::{Error as PowError, PowVerifier, PowAlgorithm, Seal, PoWBlockImport, Difficulty};
+use blake3::Hasher;
 
 
 
@@ -22,10 +23,48 @@ impl Blake3POW{
             client,
         }
     }
+
+    pub fn hash_meets_difficulty(hash: &H256, difficulty: U256) -> bool{
+        let hash = U256::from(&hash[..]);
+        let(_, overflowed) = hash.overflowing_mul(difficulty);
+        !overflowed
+    }
+
+    #[derive(Encode, Decode, Clone, PartialEq, Eq, Debug)]
+    pub struct Seal{
+        pub difficulty: U256,
+        pub work: H256,
+        pub nonce: H256,
+    }
+
+    pub struct Compute<'a>{
+        pub difficulty: U256,
+        pub preHash: &'a H256,
+        pub nonce: &'a H256,
+    }
+
+    impl Compute {
+        pub fn compute(&self) -> Seal{
+            let mut work = [0u8; 32];
+            work.copy_from_slice(&blake3::hash(&[&self.preHash[..], &self.nonce[..]]).as_bytes()[..]);
+            Seal{
+                difficulty: self.difficulty,
+                work: work.into(),
+                nonce: self.nonce.clone(),
+            }
+        }
+    }
+
+impl <C> Clone for Blake3POW<C>{
+    fn clone(&self) -> Self{
+        Blake3POW{
+            client: self.client.clone(),
+        }
+    }
 }
 
 
-impl<B: BlockT<Hash=H256>> PowAlgorithm<B> for Blake3POW{
+impl<B: BlockT<Hash=H256>, C> PowAlgorithm<B> for Blake3POW where C: ProvideRuntimeApi<B>, C::Api: DifficultyApi<B>,{
     type Difficulty = U256;
 
     fn difficulty(&self, parent: B::Hash)-> Result<Self::Difficulty, Error<B>>{
@@ -33,21 +72,18 @@ impl<B: BlockT<Hash=H256>> PowAlgorithm<B> for Blake3POW{
         self.client.runtime_api().difficulty(&parentID).map_err(|e| {sc_consensus_pow::Error::Environment(format!("{:?}", e)).into()});
     }
 
-
-
-
     fn verify(
         &self,
         _parent: &BlockId<B>,
         preHash: &H256,
-        seal: &Seal,
+        seal: &RawSeal,
         difficulty: Self::Difficulty,
     ) -> Result<bool, Error<B>>{
-        let seal = match seal{
-            Seal::Regular(seal) => seal,
-            _ => return Ok(false),
+        let seal = match Seal::decode(&mut &seal[..]){
+            ok(seal) => seal,
+            Err(_) => return Ok(false),
         };
-
+        //Check if the hash meets the difficulty if not then abort
         if!hash_meets_difficulty(&seal.work, difficulty){
             return Ok(false);
         }
@@ -61,28 +97,6 @@ impl<B: BlockT<Hash=H256>> PowAlgorithm<B> for Blake3POW{
         }
     }
 
-    fn mine(
-        &self,
-        _parent: &BlockId<B>,
-        preHash: &H256,
-        difficulty: Self::Difficulty,
-        _round: u32,
-    ) -> Result<Option<Seal>, Error<B>>{
-        let mut preHash = preHash.clone();
-        let mut seal = Seal::default();
-        let mut nonce = 0u64;
-        loop{
-            preHash.extend_from_slice(&seal);
-            let hash = blake3::hash(&preHash);
-            let hash = U256::from(hash.as_bytes());
-            if hash < difficulty{
-                break;
-            }
-            nonce += 1;
-            seal = Seal::from(nonce.to_le_bytes());
-        }
-        Ok(Some(seal))
-    }
 }
 
 impl sp_consensus::Environment<B> for Blake3POW{
@@ -116,5 +130,6 @@ impl<B: BlockT<Hash=H256>> sp_consensus::CreateProposer<B> for Blake3POWProposer
         };
         Ok(proposer)
     }
+}
 }
 
