@@ -1,0 +1,11 @@
+[package]
+name = "argonaut-prism-network"
+version = "0.1.0"
+edition = "2021"
+license = "Unlicense"
+description = "Prism gossip and sync protocols over sc-network"
+
+[dependencies]
+parity-scale-codec = { workspace = true, features = ["std"] }
+argonaut-primitives-prism = { path = "../../primitives/prism" }
+argonaut-prism-chain = { path = "../prism-chain" }

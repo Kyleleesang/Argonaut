@@ -1,0 +1,12 @@
+[package]
+name = "argonaut-prism-ledger"
+version = "0.1.0"
+edition = "2021"
+license = "Unlicense"
+description = "Prism confirmation rules + BuildLedger + Substrate bridge"
+
+[dependencies]
+parity-scale-codec = { workspace = true, features = ["std"] }
+argonaut-primitives-prism = { path = "../../primitives/prism" }
+argonaut-prism-chain = { path = "../prism-chain" }
+argonaut-prism-db = { path = "../prism-db" }

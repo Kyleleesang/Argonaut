@@ -1,0 +1,15 @@
+[package]
+name = "argonaut-prism-miner"
+version = "0.1.0"
+edition = "2021"
+license = "Unlicense"
+description = "Prism PoW mining loop — assembles superblock templates, runs sortition"
+
+[dependencies]
+parity-scale-codec = { workspace = true, features = ["std"] }
+argonaut-primitives-prism = { path = "../../primitives/prism" }
+argonaut-prism-chain = { path = "../prism-chain" }
+argonaut-prism-db = { path = "../prism-db" }
+blake3 = { workspace = true, features = ["std"] }
+arc-swap = { workspace = true }
+sp-core = { workspace = true, features = ["std"] }

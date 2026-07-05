@@ -1,0 +1,12 @@
+[package]
+name = "argonaut-prism-db"
+version = "0.1.0"
+edition = "2021"
+license = "Unlicense"
+description = "RocksDB backing store for the Prism DAG (native only)"
+
+[dependencies]
+parity-scale-codec = { workspace = true, features = ["std"] }
+rocksdb = { workspace = true }
+argonaut-primitives-prism = { path = "../../primitives/prism" }
+thiserror = { workspace = true }

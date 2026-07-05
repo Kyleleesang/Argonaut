@@ -1,0 +1,29 @@
+[package]
+name = "pallet-agg-verify"
+version = "0.1.0"
+edition = "2021"
+license = "Unlicense"
+description = "STARK bundle verification pallet with XMSS epoch replay protection"
+
+[dependencies]
+parity-scale-codec = { workspace = true }
+scale-info = { workspace = true }
+frame-support = { workspace = true }
+frame-system = { workspace = true }
+sp-core = { workspace = true }
+sp-runtime = { workspace = true }
+sp-std = { workspace = true }
+argonaut-primitives-agg = { path = "../../primitives/agg", default-features = false }
+
+[features]
+default = ["std"]
+std = [
+    "parity-scale-codec/std",
+    "scale-info/std",
+    "frame-support/std",
+    "frame-system/std",
+    "sp-core/std",
+    "sp-runtime/std",
+    "sp-std/std",
+    "argonaut-primitives-agg/std",
+]

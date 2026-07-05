@@ -1,0 +1,16 @@
+[package]
+name = "argonaut-aggregator"
+version = "0.1.0"
+edition = "2021"
+license = "Unlicense"
+description = "XMSS/STARK aggregator service and standalone binary"
+
+[[bin]]
+name = "argonaut-aggregator"
+path = "src/main.rs"
+
+[dependencies]
+parity-scale-codec = { workspace = true, features = ["std"] }
+argonaut-primitives-agg = { path = "../../primitives/agg" }
+thiserror = { workspace = true }
+tokio = { workspace = true }
