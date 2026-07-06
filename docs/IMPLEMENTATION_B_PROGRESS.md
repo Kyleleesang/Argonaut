@@ -2,11 +2,11 @@
 
 Tracks status against [`ARGONAUT_ARCHITECTURE_GUIDE.md`](./ARGONAUT_ARCHITECTURE_GUIDE.md) §3 ("Implementation B — Prism Consensus") and its milestones in §3.9. Follows [`IMPLEMENTATION_A_PROGRESS.md`](./IMPLEMENTATION_A_PROGRESS.md) per the doc's §6 build order. Lives on the `Base` branch.
 
-## Status: B1 complete and tested. B0 not started.
+## Status: B0 and B1 both complete and tested.
 
 | §3.9 milestone | Status |
 |---|---|
-| **B0** (optional): Aura → `sc-consensus-pow` swap, blake3 `PowAlgorithm`, two-node devnet mines and syncs | ⬜ not started |
+| **B0** (optional): Aura → `sc-consensus-pow` swap, blake3 `PowAlgorithm`, two-node devnet mines and syncs | ✅ done this session (see below) |
 | **B1**: primitives + db + chain state machine, fully unit-tested offline; property test vote counts == recount-from-scratch | ✅ done this session (see below) |
 | B2: miner + network, single-node self-mining, 4-node convergence | ⬜ not started (depends on B0/B1) |
 | B3: ledger stage 1 + Substrate bridge; Aura/GRANDPA removed | ⬜ not started |
@@ -60,6 +60,43 @@ Unchanged this session — it already had 4 passing tests from Phase 0 and match
 - **Networking** — deliberately out of scope per B1's own description ("no networking"); that's B2.
 - **Distinct per-chain genesis hashes** (doc §3.2: "hashed deterministically from `(chain_spec_genesis_hash, chain_id)`") — `primitives/prism::genesis_hash()` exists but `PrismChain::new()` still seeds every voter chain and the proposer tree from a single shared `H256::zero()` sentinel. Fine for offline state-machine testing (which is all B1 asks for); wiring real chain-spec-derived genesis hashes is a B2/network-integration concern.
 
-## Next: B0
+## B0 — what changed
 
-Not started. Per §3.9, B0 swaps Aura for `sc-consensus-pow` with a blake3 `PowAlgorithm` on the existing single (non-Prism) chain, as a self-contained rehearsal for the import-queue/mining-worker plumbing before it's needed for real in B3 (where Aura/GRANDPA get removed permanently in favor of the Prism-ledger bridge). Explicitly labeled optional in the doc; its own output is transitional and gets superseded at B3, not reused. Scope: replace `pallet_aura`/`pallet_grandpa` wiring in `runtime/` and `node/src/service.rs` with `sc_consensus_pow`, a minimal fixed-difficulty blake3 `PowAlgorithm` impl, and a mining worker; update the chain spec to drop Aura/Grandpa authority seeding; acceptance is a two-node devnet that mines and syncs.
+Swapped Aura+GRANDPA for `sc_consensus_pow` with a minimal blake3 `PowAlgorithm` (`node/src/pow.rs`), as a self-contained rehearsal for the import-queue/mining-worker plumbing before it's needed for real in B3 (where this whole module gets replaced by the Prism-ledger bridge — nothing here is meant to survive past that point, per its own module doc comment).
+
+### `runtime/`
+- Removed `pallet_aura`/`pallet_grandpa` from `Cargo.toml`, `construct_runtime!`, and their `Config` impls; removed the `AuraApi`/`GrandpaApi` runtime API impls.
+- `pallet_timestamp::Config::OnTimestampSet` changed from `Aura` to `()` (nothing to notify — PoW authors client-side).
+- **Kept an empty `SessionKeys` runtime API** (`impl_opaque_keys! { pub struct SessionKeys {} }` + the `sp_session::SessionKeys` impl) even though nothing in this design uses session keys — discovered the hard way that `sc_service::spawn_tasks` (used unconditionally by every node, regardless of consensus mechanism) has a structural `RuntimeApiImpl: sp_session::SessionKeys<Block>` bound. Removing it entirely doesn't compile; this is apparently a fact of life for any polkadot-sdk `stable2412` runtime, not something specific to Aura/GRANDPA.
+
+### `node/src/pow.rs` (new)
+- `Blake3Pow`: `PowAlgorithm<Block>` with `Difficulty = U256` (which already implements the required `TotalDifficulty` trait in `sp_consensus_pow`, no custom type needed). `verify()` decodes the seal as a little-endian `u64` nonce, hashes `blake3(pre_hash ++ nonce)`, and checks it against difficulty as a big-endian `U256` — the same shape `argonaut_primitives_prism::sortition`/`block_hash` already use, for consistency.
+- **Fixed difficulty, no retargeting at all** — deliberately out of scope for this rehearsal milestone (real retargeting is specified for the actual Prism miner in §3.5, not this throwaway chain). See "Known limitation" below.
+
+### `node/src/service.rs`
+- Replaced the Aura import queue + GRANDPA block import/voter/warp-sync wiring with `PowBlockImport` + `sc_consensus_pow::import_queue` + `sc_consensus_pow::start_mining_worker`.
+- The actual CPU-bound nonce search runs on a **plain `std::thread`**, not through `task_manager`'s `spawn_blocking`. Reason: `MiningHandle::submit` (in `sc-consensus-pow` itself) holds a `parking_lot` mutex guard across an `.await` internally, so the future it returns isn't `Send` — `spawn_blocking` requires `Future + Send` and rejects it. `futures::executor::block_on` sidesteps this: it only requires the *thread* to block, not the future to be `Send`.
+- **Bug caught during manual testing, not code review**: the first version of the mining loop reset its nonce counter to `0` at the top of every outer-loop iteration. With difficulty giving roughly a 1-in-2^20 chance per hash and only 200,000 attempts per batch (~17% success chance per batch), any batch that failed would retry the *exact same* nonce range forever, permanently stalling. Fixed by moving the counter outside the loop so it keeps climbing across iterations/targets.
+- No warp sync (it piggybacks on GRANDPA's authority-set proofs, which don't exist here); full sync only, fine for a devnet.
+
+### `node/src/chain_spec.rs` / `command.rs`
+- Genesis no longer seeds Aura/GRANDPA authority sets (nothing to seed).
+- `Revert` subcommand's GRANDPA-specific `aux_revert` hook removed (no finality gadget to revert).
+
+## Known limitation, flagged for follow-up (per explicit request): difficulty does not scale with network hash rate
+
+The mining target (`node/src/pow.rs::fixed_difficulty`) is a **hardcoded constant**, empirically tuned only against this one dev machine's blake3 throughput to land around single-digit-second blocks. It was initially copied from `argonaut_primitives_prism::Params::testnet()`'s own difficulty shift for consistency, but that value turned out calibrated for a completely different (much larger, competitive network) assumption — at that setting, this single CPU mined sub-second blocks and regularly outran the block-timestamp inherent's tolerance. Retuned empirically (tried three values live against a running node) to `U256::max_value() >> 24`.
+
+This has no feedback loop: if more miners join the network (or run faster hardware), blocks will simply come out faster than intended indefinitely — there's nothing pulling difficulty back up to compensate, unlike Bitcoin-style rolling-window retargeting. Before this consensus is used for anything beyond a single-machine/local-devnet rehearsal, it needs either a `DifficultyApi`-backed on-chain adjustment or a client-side rolling-window retarget against recent block timestamps. Explicitly not implemented here since B0's own scope (§3.9) frames it as throwaway rehearsal code for the import-queue plumbing, with real retargeting logic specified for the actual Prism miner (§3.5) instead — but noting it prominently since a fixed difficulty is a real footgun if anyone tries to run this multi-node setup unattended or at scale.
+
+## Verified (B0)
+
+- `cargo check --workspace` / `cargo test --workspace`: clean throughout (49 tests, 0 failures — consensus swap doesn't touch anything the existing test suite exercises).
+- `cargo build --release -p argonaut-node`: clean.
+- **Single-node mining**: `--dev` node authors and imports blocks steadily under PoW (no Aura at all in the binary).
+- **Two-node sync (the literal acceptance criterion)**: started node1 with a fixed `--node-key` for a deterministic peer ID, let it mine to block #15, started node2 with `--bootnodes` pointing at node1. Node2 connected (`1 peers` in both logs), synced from #0 to #20 within seconds, and both nodes converged on byte-identical best-block hashes at every height checked, continuing to co-mine (each occasionally wins a block, the other imports it) through block #26 before the test was stopped.
+- Occasional `"timestamp of the block is too far in the future"` import failures observed on both single- and two-node runs — non-fatal (mining simply retries and succeeds shortly after); a symptom of block times not being perfectly tuned against `pallet_timestamp`'s tolerances, not a correctness bug. Left as-is given B0's rehearsal scope.
+
+## Next: B2
+
+B0 and B1 are both done. Per the doc's build order, B2 is "miner + network, single-node self-mining loopback, then 4-node docker-compose devnet: all node DBs converge (identical leader sequence) after churn" — this wires `client/prism-miner` (currently unwired stub) and `client/prism-network` together against the now-real `PrismChain` state machine from B1, for the first time exercising Prism block production and gossip end-to-end rather than PrismChain in isolation.

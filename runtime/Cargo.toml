@@ -21,9 +21,7 @@ frame-system-benchmarking      = { git = "https://github.com/paritytech/polkadot
 frame-benchmarking             = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412", default-features = false, optional = true }
 frame-system-rpc-runtime-api   = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412", default-features = false }
 
-pallet-aura            = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412", default-features = false }
 pallet-balances        = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412", default-features = false }
-pallet-grandpa         = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412", default-features = false }
 pallet-insecure-randomness-collective-flip = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412", default-features = false }
 pallet-sudo            = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412", default-features = false }
 pallet-timestamp       = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412", default-features = false }
@@ -34,8 +32,6 @@ argonaut-primitives-falcon = { path = "../primitives/falcon", default-features =
 
 sp-api             = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412", default-features = false }
 sp-block-builder   = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412", default-features = false }
-sp-consensus-aura  = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412", default-features = false }
-sp-consensus-grandpa = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412", default-features = false }
 sp-core            = { workspace = true }
 sp-genesis-builder = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412", default-features = false }
 sp-inherents       = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412", default-features = false }
@@ -67,9 +63,7 @@ std = [
     "frame-system/std",
     "frame-system-rpc-runtime-api/std",
     "frame-try-runtime/std",
-    "pallet-aura/std",
     "pallet-balances/std",
-    "pallet-grandpa/std",
     "pallet-insecure-randomness-collective-flip/std",
     "pallet-sudo/std",
     "pallet-timestamp/std",
@@ -79,8 +73,6 @@ std = [
     "argonaut-primitives-falcon/std",
     "sp-api/std",
     "sp-block-builder/std",
-    "sp-consensus-aura/std",
-    "sp-consensus-grandpa/std",
     "sp-core/std",
     "sp-genesis-builder/std",
     "sp-inherents/std",
@@ -97,7 +89,6 @@ runtime-benchmarks = [
     "frame-system/runtime-benchmarks",
     "frame-system-benchmarking/runtime-benchmarks",
     "pallet-balances/runtime-benchmarks",
-    "pallet-grandpa/runtime-benchmarks",
     "pallet-timestamp/runtime-benchmarks",
     "pallet-falcon-registry/runtime-benchmarks",
     "sp-runtime/runtime-benchmarks",
@@ -108,9 +99,6 @@ try-runtime = [
     "frame-executive/try-runtime",
     "frame-system/try-runtime",
     "frame-support/try-runtime",
-    "pallet-aura/try-runtime",
-    "pallet-balances/try-runtime",
-    "pallet-grandpa/try-runtime",
     "pallet-insecure-randomness-collective-flip/try-runtime",
     "pallet-sudo/try-runtime",
     "pallet-timestamp/try-runtime",

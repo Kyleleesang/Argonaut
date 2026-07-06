@@ -1,7 +1,5 @@
-use argonaut_runtime::{AccountId, Signature, EXISTENTIAL_DEPOSIT, WASM_BINARY};
+use argonaut_runtime::{AccountId, Signature, WASM_BINARY};
 use sc_service::ChainType;
-use sp_consensus_aura::sr25519::AuthorityId as AuraId;
-use sp_consensus_grandpa::AuthorityId as GrandpaId;
 use sp_core::{sr25519, Pair, Public};
 use sp_runtime::traits::{IdentifyAccount, Verify};
 
@@ -22,10 +20,6 @@ where
     AccountPublic::from(get_from_seed::<TPublic>(seed)).into_account()
 }
 
-pub fn authority_keys_from_seed(s: &str) -> (AuraId, GrandpaId) {
-    (get_from_seed::<AuraId>(s), get_from_seed::<GrandpaId>(s))
-}
-
 pub fn development_config() -> Result<ChainSpec, String> {
     Ok(ChainSpec::builder(
         WASM_BINARY.ok_or_else(|| "Development wasm not available".to_string())?,
@@ -35,7 +29,6 @@ pub fn development_config() -> Result<ChainSpec, String> {
     .with_id("dev")
     .with_chain_type(ChainType::Development)
     .with_genesis_config_patch(testnet_genesis(
-        vec![authority_keys_from_seed("Alice")],
         get_account_id_from_seed::<sr25519::Public>("Alice"),
         vec![
             get_account_id_from_seed::<sr25519::Public>("Alice"),
@@ -56,7 +49,6 @@ pub fn local_testnet_config() -> Result<ChainSpec, String> {
     .with_id("local_testnet")
     .with_chain_type(ChainType::Local)
     .with_genesis_config_patch(testnet_genesis(
-        vec![authority_keys_from_seed("Alice"), authority_keys_from_seed("Bob")],
         get_account_id_from_seed::<sr25519::Public>("Alice"),
         vec![
             get_account_id_from_seed::<sr25519::Public>("Alice"),
@@ -76,26 +68,15 @@ pub fn local_testnet_config() -> Result<ChainSpec, String> {
     .build())
 }
 
-fn testnet_genesis(
-    initial_authorities: Vec<(AuraId, GrandpaId)>,
-    root_key: AccountId,
-    endowed_accounts: Vec<AccountId>,
-) -> serde_json::Value {
+// B0: no Aura/GRANDPA authority set to seed -- sc-consensus-pow authors blocks
+// client-side (any node with `--validator`/authority role mines), and there's no
+// finality gadget yet (see node/src/pow.rs).
+fn testnet_genesis(root_key: AccountId, endowed_accounts: Vec<AccountId>) -> serde_json::Value {
     serde_json::json!({
         "balances": {
             "balances": endowed_accounts.iter()
                 .cloned()
                 .map(|k| (k, 1u64 << 60))
-                .collect::<Vec<_>>()
-        },
-        "aura": {
-            "authorities": initial_authorities.iter()
-                .map(|x| x.0.clone())
-                .collect::<Vec<_>>()
-        },
-        "grandpa": {
-            "authorities": initial_authorities.iter()
-                .map(|x| (x.1.clone(), 1u64))
                 .collect::<Vec<_>>()
         },
         "sudo": { "key": Some(root_key) }

@@ -12,12 +12,12 @@ name = "argonaut-node"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
+tokio = { version = "1", features = ["time"] }
 
 sc-cli              = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412" }
 sc-client-api       = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412" }
 sc-consensus        = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412" }
-sc-consensus-aura   = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412" }
-sc-consensus-grandpa = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412" }
+sc-consensus-pow    = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412" }
 sc-executor         = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412" }
 sc-keystore         = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412" }
 sc-network          = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412" }
@@ -35,8 +35,7 @@ sp-api              = { git = "https://github.com/paritytech/polkadot-sdk", bran
 sp-block-builder    = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412" }
 sp-blockchain       = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412" }
 sp-consensus        = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412" }
-sp-consensus-aura   = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412" }
-sp-consensus-grandpa = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412" }
+sp-consensus-pow    = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412" }
 sp-core             = { workspace = true, features = ["std"] }
 sp-inherents        = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412" }
 sp-io               = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412" }
