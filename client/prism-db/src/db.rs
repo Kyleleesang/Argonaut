@@ -114,3 +114,98 @@ impl PrismDb {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use argonaut_primitives_prism::{BlockContent, MerkleProof, SuperHeader};
+    use sp_core::U256;
+
+    fn tmp_db() -> (tempfile::TempDir, PrismDb) {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let db = PrismDb::open(dir.path()).expect("open PrismDb");
+        (dir, db)
+    }
+
+    fn dummy_tx_block(nonce: u64) -> PrismBlock {
+        PrismBlock {
+            header: SuperHeader {
+                parents_root: H256::zero(),
+                content_root: H256::zero(),
+                timestamp_ms: 0,
+                nonce,
+                difficulty: U256::max_value(),
+            },
+            parent: H256::zero(),
+            content: BlockContent::Transaction { txs: vec![vec![nonce as u8]] },
+            parent_proof: MerkleProof::default(),
+            content_proof: MerkleProof::default(),
+        }
+    }
+
+    #[test]
+    fn insert_and_get_block_round_trips() {
+        let (_dir, db) = tmp_db();
+        let block = dummy_tx_block(1);
+        let hash = block_hash(&block.header);
+
+        assert!(db.get_block(&hash).unwrap().is_none());
+        db.insert_block(&block).unwrap();
+
+        let fetched = db.get_block(&hash).unwrap().expect("block should be present");
+        assert_eq!(fetched, block);
+    }
+
+    #[test]
+    fn insert_block_sets_status_valid() {
+        let (_dir, db) = tmp_db();
+        let block = dummy_tx_block(2);
+        let hash = block_hash(&block.header);
+
+        assert_eq!(db.get_block_status(&hash).unwrap(), None);
+        db.insert_block(&block).unwrap();
+        assert_eq!(db.get_block_status(&hash).unwrap(), Some(BlockStatus::Valid));
+    }
+
+    #[test]
+    fn set_block_status_overrides_it() {
+        let (_dir, db) = tmp_db();
+        let block = dummy_tx_block(3);
+        let hash = block_hash(&block.header);
+        db.insert_block(&block).unwrap();
+
+        db.set_block_status(&hash, BlockStatus::Orphan).unwrap();
+        assert_eq!(db.get_block_status(&hash).unwrap(), Some(BlockStatus::Orphan));
+    }
+
+    #[test]
+    fn u64_round_trip() {
+        let (_dir, db) = tmp_db();
+        db.put_u64(PROPOSER_TREE_LEVEL, b"key", 42).unwrap();
+        assert_eq!(db.get_u64(PROPOSER_TREE_LEVEL, b"key").unwrap(), Some(42));
+        assert_eq!(db.get_u64(PROPOSER_TREE_LEVEL, b"missing").unwrap(), None);
+    }
+
+    #[test]
+    fn h256_round_trip() {
+        let (_dir, db) = tmp_db();
+        let val = H256::from([7u8; 32]);
+        db.put_h256(PROPOSER_NODE_VOTE, b"key", &val).unwrap();
+        assert_eq!(db.get_h256(PROPOSER_NODE_VOTE, b"key").unwrap(), Some(val));
+        assert_eq!(db.get_h256(PROPOSER_NODE_VOTE, b"missing").unwrap(), None);
+    }
+
+    #[test]
+    fn reopening_the_same_path_preserves_data() {
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let block = dummy_tx_block(4);
+        let hash = block_hash(&block.header);
+        {
+            let db = PrismDb::open(dir.path()).expect("open PrismDb");
+            db.insert_block(&block).unwrap();
+        }
+        // Re-open against the same on-disk path -- data must survive.
+        let db = PrismDb::open(dir.path()).expect("re-open PrismDb");
+        assert_eq!(db.get_block(&hash).unwrap(), Some(block));
+    }
+}

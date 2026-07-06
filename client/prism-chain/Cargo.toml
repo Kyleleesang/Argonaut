@@ -9,3 +9,6 @@ description = "Prism DAG state machine — vote accounting, chain tips, orphan p
 parity-scale-codec = { workspace = true, features = ["std"] }
 argonaut-primitives-prism = { path = "../../primitives/prism" }
 argonaut-prism-db = { path = "../prism-db" }
+
+[dev-dependencies]
+sp-core = { workspace = true, features = ["std"] }

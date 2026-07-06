@@ -305,6 +305,7 @@ dependencies = [
  "argonaut-primitives-prism",
  "argonaut-prism-db",
  "parity-scale-codec",
+ "sp-core",
 ]
 
 [[package]]
@@ -314,6 +315,8 @@ dependencies = [
  "argonaut-primitives-prism",
  "parity-scale-codec",
  "rocksdb",
+ "sp-core",
+ "tempfile",
  "thiserror 1.0.69",
 ]
 
