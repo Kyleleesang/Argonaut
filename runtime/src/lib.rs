@@ -23,7 +23,7 @@ use sp_runtime::{
     create_runtime_str, generic, impl_opaque_keys,
     traits::{AccountIdLookup, BlakeTwo256, Block as BlockT, IdentifyAccount, NumberFor, Verify},
     transaction_validity::{TransactionSource, TransactionValidity},
-    ApplyExtrinsicResult, MultiSignature,
+    ApplyExtrinsicResult,
 };
 #[cfg(feature = "std")]
 use sp_version::NativeVersion;
@@ -39,7 +39,7 @@ pub use sp_runtime::{Perbill, Permill};
 // ── Core types ────────────────────────────────────────────────────────────────
 
 pub type BlockNumber = u32;
-pub type Signature = MultiSignature;
+pub type Signature = argonaut_primitives_falcon::ArgonautSignature;
 pub type AccountId = <<Signature as Verify>::Signer as IdentifyAccount>::AccountId;
 pub type Balance = u128;
 pub type Nonce = u32;
@@ -212,6 +212,16 @@ impl pallet_sudo::Config for Runtime {
     type WeightInfo = pallet_sudo::weights::SubstrateWeight<Runtime>;
 }
 
+/// Storage deposit for registering a Falcon-512 public key (~900 bytes of on-chain
+/// state); refunded on deregistration. See architecture guide §2.3.
+pub const FALCON_KEY_DEPOSIT: Balance = 1 * EXISTENTIAL_DEPOSIT;
+
+impl pallet_falcon_registry::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type Currency = Balances;
+    type KeyDeposit = ConstU128<FALCON_KEY_DEPOSIT>;
+}
+
 // ── Construct runtime ─────────────────────────────────────────────────────────
 
 construct_runtime!(
@@ -222,6 +232,7 @@ construct_runtime!(
         Aura: pallet_aura,
         Grandpa: pallet_grandpa,
         Balances: pallet_balances,
+        FalconRegistry: pallet_falcon_registry,
         TransactionPayment: pallet_transaction_payment,
         Sudo: pallet_sudo,
     }

@@ -10,9 +10,8 @@ use sp_consensus_aura::sr25519::AuthorityPair as AuraPair;
 use std::{sync::Arc, time::Duration};
 
 /// Host function set for the wasm executor.
-/// Phase A: extend with Falcon host functions.
-///   type HostFunctions = (sp_io::SubstrateHostFunctions, falcon_crypto::HostFunctions);
-type HostFunctions = sp_io::SubstrateHostFunctions;
+type HostFunctions =
+    (sp_io::SubstrateHostFunctions, argonaut_primitives_falcon::falcon_crypto::HostFunctions);
 
 pub type FullClient =
     sc_service::TFullClient<Block, RuntimeApi, sc_executor::WasmExecutor<HostFunctions>>;

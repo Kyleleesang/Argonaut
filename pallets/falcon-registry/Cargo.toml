@@ -15,6 +15,10 @@ sp-runtime = { workspace = true }
 sp-std = { workspace = true }
 argonaut-primitives-falcon = { path = "../../primitives/falcon", default-features = false }
 
+[dev-dependencies]
+sp-io = { workspace = true, features = ["std"] }
+pallet-balances = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412" }
+
 [features]
 default = ["std"]
 std = [

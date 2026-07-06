@@ -210,6 +210,7 @@ dependencies = [
 name = "argonaut-node"
 version = "0.1.0"
 dependencies = [
+ "argonaut-primitives-falcon",
  "argonaut-runtime",
  "clap",
  "frame-benchmarking",
@@ -268,10 +269,14 @@ name = "argonaut-primitives-falcon"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "fn-dsa",
  "fn-dsa-vrfy",
  "parity-scale-codec",
+ "rand_chacha 0.3.1",
+ "rand_core 0.6.4",
  "scale-info",
  "sp-core",
+ "sp-runtime",
  "sp-runtime-interface",
 ]
 
@@ -339,6 +344,7 @@ dependencies = [
 name = "argonaut-runtime"
 version = "0.1.0"
 dependencies = [
+ "argonaut-primitives-falcon",
  "frame-benchmarking",
  "frame-executive",
  "frame-support",
@@ -349,6 +355,7 @@ dependencies = [
  "hex-literal",
  "pallet-aura",
  "pallet-balances",
+ "pallet-falcon-registry",
  "pallet-grandpa",
  "pallet-insecure-randomness-collective-flip",
  "pallet-sudo",
@@ -2740,12 +2747,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "fn-dsa"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72ff5acd83e4de3bdb8b3f75e5477e65e133c5bf91ab627c5065585754d4d64a"
+dependencies = [
+ "fn-dsa-comm",
+ "fn-dsa-kgen",
+ "fn-dsa-sign",
+ "fn-dsa-vrfy",
+]
+
+[[package]]
 name = "fn-dsa-comm"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94de00e13018efad7640c383a100e140c7693f47b24d3b17da3469dac115409c"
 dependencies = [
  "rand_core 0.6.4",
+]
+
+[[package]]
+name = "fn-dsa-kgen"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a78d3bd0de5d66f1a528ff2ecfc8e346cc2fe082c7e9803f22281e6c72bb90a2"
+dependencies = [
+ "fn-dsa-comm",
+ "zeroize",
+]
+
+[[package]]
+name = "fn-dsa-sign"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e543a0773e8ffff6577966ce12718ce07054ff5e11c80c122c22830cff2e19f"
+dependencies = [
+ "fn-dsa-comm",
+ "zeroize",
 ]
 
 [[package]]
@@ -6203,9 +6242,11 @@ dependencies = [
  "argonaut-primitives-falcon",
  "frame-support",
  "frame-system",
+ "pallet-balances",
  "parity-scale-codec",
  "scale-info",
  "sp-core",
+ "sp-io",
  "sp-runtime",
  "sp-std",
 ]

@@ -14,6 +14,25 @@
 
 pub use pallet::*;
 
+#[cfg(test)]
+mod mock;
+#[cfg(test)]
+mod tests;
+
+use argonaut_primitives_falcon::FalconPublic;
+
+/// Public-key lookup consumed by the `CheckFalconSignature` TransactionExtension
+/// (runtime crate) to resolve registry-mode signatures, which carry no inline key.
+pub trait KeyProvider<AccountId> {
+    fn key_of(who: &AccountId) -> Option<FalconPublic>;
+}
+
+impl<T: pallet::Config> KeyProvider<T::AccountId> for pallet::Pallet<T> {
+    fn key_of(who: &T::AccountId) -> Option<FalconPublic> {
+        pallet::Pallet::<T>::key_of(who)
+    }
+}
+
 #[frame_support::pallet]
 pub mod pallet {
     use argonaut_primitives_falcon::{falcon_crypto, FalconPublic};

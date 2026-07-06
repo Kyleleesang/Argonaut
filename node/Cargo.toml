@@ -54,6 +54,7 @@ frame-benchmarking      = { git = "https://github.com/paritytech/polkadot-sdk", 
 frame-benchmarking-cli  = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412" }
 
 argonaut-runtime = { version = "0.1.0", path = "../runtime" }
+argonaut-primitives-falcon = { path = "../primitives/falcon" }
 serde_json = { workspace = true }
 
 [build-dependencies]
