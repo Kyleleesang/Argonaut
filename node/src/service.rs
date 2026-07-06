@@ -1,12 +1,20 @@
 use crate::pow::{seal_value, Blake3Pow};
 use futures::FutureExt;
+use argonaut_primitives_prism::Params as PrismParams;
+use argonaut_prism_chain::PrismChain;
+use argonaut_prism_db::PrismDb;
+use argonaut_prism_miner::{build_template, PrismMiner};
+use argonaut_prism_network::wire::{blocks_protocol_config, sync_protocol_config, PrismNetworkWorker};
 use argonaut_runtime::{self, opaque::Block, RuntimeApi};
 use sc_client_api::Backend;
 use sc_consensus_pow::PowBlockImport;
 use sc_service::{error::Error as ServiceError, Configuration, TaskManager};
 use sc_telemetry::{Telemetry, TelemetryWorker};
 use sc_transaction_pool_api::OffchainTransactionPoolFactory;
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 /// Host function set for the wasm executor.
 type HostFunctions =
@@ -139,12 +147,23 @@ pub fn new_full<N: sc_network::NetworkBackend<Block, <Block as sp_runtime::trait
         other: (pow_block_import, mut telemetry),
     } = new_partial(&config)?;
 
-    let net_config = sc_network::config::FullNetworkConfiguration::<
+    let mut net_config = sc_network::config::FullNetworkConfiguration::<
         Block,
         <Block as sp_runtime::traits::Block>::Hash,
         N,
     >::new(&config.network, config.prometheus_registry().cloned());
     let metrics = N::register_notification_metrics(config.prometheus_registry());
+
+    // B2: Prism's own gossip (blocks) and sync (orphan/catch-up fetch) protocols,
+    // registered alongside the main chain's sync protocol. Config construction
+    // must happen before `build_network` consumes `net_config` by value below.
+    let (prism_blocks_config, prism_notification_service) =
+        blocks_protocol_config::<Block, N>(metrics.clone(), net_config.peer_store_handle());
+    net_config.add_notification_protocol(prism_blocks_config);
+
+    let (prism_sync_tx, prism_sync_rx) = async_channel::bounded(64);
+    let prism_sync_config = sync_protocol_config::<Block, N>(prism_sync_tx);
+    net_config.add_request_response_protocol(prism_sync_config);
 
     let (network, system_rpc_tx, tx_handler_controller, network_starter, sync_service) =
         sc_service::build_network(sc_service::BuildNetworkParams {
@@ -162,6 +181,43 @@ pub fn new_full<N: sc_network::NetworkBackend<Block, <Block as sp_runtime::trait
             block_relay: None,
             metrics,
         })?;
+
+    // B2: Prism runs entirely alongside the B0 PoW chain above -- separate DB,
+    // separate DAG state machine, separate gossip/sync protocols. It doesn't
+    // yet drive the actual Substrate chain (that's B3's job); this is purely
+    // the miner+network rehearsal the architecture guide's B2 milestone asks for.
+    //
+    // Deliberately NOT `Params::testnet()`: at m=100 voter chains, testnet's
+    // difficulty (calibrated for a single-target PoW chain, see node/src/pow.rs)
+    // produces several *dozen* Prism blocks per second on one CPU, since any of
+    // the 102 slots succeeding counts as a find. Empirically that flood of
+    // notifications was enough to trip peer reputation/rate-limiting and drop
+    // the connection within a couple of seconds during live two-node testing.
+    // Scaled down ~100x (roughly `log2(102)` extra bits) to land in the same
+    // single-digit-second range as the tuned B0 PoW target.
+    let prism_params = {
+        let mut p = PrismParams::testnet();
+        p.difficulty = p.difficulty >> 7;
+        p.f_v = p.f_v >> 7;
+        p.f_t = p.f_t >> 7;
+        p.f_p = p.f_p >> 7;
+        p
+    };
+    let prism_db = Arc::new(
+        PrismDb::open(&config.base_path.path().join("prism"))
+            .map_err(|e| ServiceError::Other(format!("failed to open PrismDb: {e:?}")))?,
+    );
+    let prism_chain = Arc::new(Mutex::new(PrismChain::with_db(prism_params.clone(), prism_db.clone())));
+
+    let (prism_worker, prism_mined_tx) = PrismNetworkWorker::new(
+        prism_notification_service,
+        prism_sync_rx,
+        network.clone(),
+        prism_chain.clone(),
+        prism_db,
+        prism_params.clone(),
+    );
+    task_manager.spawn_handle().spawn("prism-network", Some("prism"), prism_worker.run());
 
     if config.offchain_worker.enabled {
         let offchain_workers =
@@ -276,6 +332,31 @@ pub fn new_full<N: sc_network::NetworkBackend<Block, <Block as sp_runtime::trait
                         futures::executor::block_on(worker.submit(seal));
                     }
                 }
+            }
+        });
+
+        // B2: Prism mining, entirely separate from the PoW mining loop above --
+        // no mempool wired up yet (transaction pool integration is out of scope
+        // for this rehearsal), so every template's tx slot is empty. Mined
+        // blocks go to `prism_mined_tx`, which `PrismNetworkWorker::run` (spawned
+        // above) picks up, inserts into `prism_chain`, and gossips to peers.
+        let prism_miner = Arc::new(PrismMiner::new(prism_params.clone()));
+        prism_miner.clone().spawn_mining_thread(0, move |block| {
+            let _ = prism_mined_tx.unbounded_send(block);
+        });
+
+        // Keeps the miner's template in sync with the DAG: since there's no
+        // mempool yet, only the parent/vote/reference slots ever change.
+        std::thread::spawn(move || {
+            let mut queue: u64 = 0;
+            loop {
+                std::thread::sleep(Duration::from_millis(500));
+                let tmpl = {
+                    let chain = prism_chain.lock().expect("PrismChain mutex poisoned");
+                    build_template(&chain, &[], queue, 8, &prism_params)
+                };
+                prism_miner.refresh(tmpl);
+                queue = (queue + 1) % 8;
             }
         });
     }

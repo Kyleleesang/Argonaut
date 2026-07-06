@@ -54,6 +54,12 @@ frame-benchmarking-cli  = { git = "https://github.com/paritytech/polkadot-sdk", 
 
 argonaut-runtime = { version = "0.1.0", path = "../runtime" }
 argonaut-primitives-falcon = { path = "../primitives/falcon" }
+argonaut-primitives-prism = { path = "../primitives/prism" }
+argonaut-prism-chain = { path = "../client/prism-chain" }
+argonaut-prism-db = { path = "../client/prism-db" }
+argonaut-prism-miner = { path = "../client/prism-miner" }
+argonaut-prism-network = { path = "../client/prism-network" }
+async-channel = "1"
 serde_json = { workspace = true }
 serde = { workspace = true }
 fn-dsa = { workspace = true }

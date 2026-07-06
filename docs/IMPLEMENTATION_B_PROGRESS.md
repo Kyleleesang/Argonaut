@@ -2,13 +2,13 @@
 
 Tracks status against [`ARGONAUT_ARCHITECTURE_GUIDE.md`](./ARGONAUT_ARCHITECTURE_GUIDE.md) §3 ("Implementation B — Prism Consensus") and its milestones in §3.9. Follows [`IMPLEMENTATION_A_PROGRESS.md`](./IMPLEMENTATION_A_PROGRESS.md) per the doc's §6 build order. Lives on the `Base` branch.
 
-## Status: B0 and B1 complete and tested. B2 partially done: single-node self-mining loopback works and is tested; real sc-network wiring and multi-node convergence are not started.
+## Status: B0 and B1 complete and tested. B2 mostly done: miner, real sc-network gossip/sync protocols, and node wiring all work and were verified live on a two-node devnet; the 4-node docker-compose convergence test is the one remaining piece.
 
 | §3.9 milestone | Status |
 |---|---|
 | **B0** (optional): Aura → `sc-consensus-pow` swap, blake3 `PowAlgorithm`, two-node devnet mines and syncs | ✅ done this session (see below) |
 | **B1**: primitives + db + chain state machine, fully unit-tested offline; property test vote counts == recount-from-scratch | ✅ done this session (see below) |
-| **B2**: miner + network, single-node self-mining loopback, then 4-node docker-compose convergence | 🟡 partial this session — self-mining loopback (miner → network validation → chain insertion, in-process) done and tested; real `sc-network` wire protocols and the 4-node docker-compose test are not started (see below) |
+| **B2**: miner + network, single-node self-mining loopback, then 4-node docker-compose convergence | 🟡 mostly done this session — miner, real `sc-network` gossip + sync protocols, and `argonaut-node` wiring all implemented and verified on a live two-node devnet (see below); only the 4-node docker-compose convergence test itself remains |
 | B3: ledger stage 1 + Substrate bridge; Aura/GRANDPA removed | ⬜ not started |
 | B4: stage-2 fast confirmation + adversarial simulation | ⬜ not started |
 | B5: pruning | ⬜ not started |
@@ -97,9 +97,9 @@ This has no feedback loop: if more miners join the network (or run faster hardwa
 - **Two-node sync (the literal acceptance criterion)**: started node1 with a fixed `--node-key` for a deterministic peer ID, let it mine to block #15, started node2 with `--bootnodes` pointing at node1. Node2 connected (`1 peers` in both logs), synced from #0 to #20 within seconds, and both nodes converged on byte-identical best-block hashes at every height checked, continuing to co-mine (each occasionally wins a block, the other imports it) through block #26 before the test was stopped.
 - Occasional `"timestamp of the block is too far in the future"` import failures observed on both single- and two-node runs — non-fatal (mining simply retries and succeeds shortly after); a symptom of block times not being perfectly tuned against `pallet_timestamp`'s tolerances, not a correctness bug. Left as-is given B0's rehearsal scope.
 
-## B2 — what changed (partial: single-node loopback only)
+## B2 — what changed
 
-Scoped down from the full milestone this session: implemented and tested the "single-node self-mining loopback" half of B2's acceptance description (miner produces a block → network layer validates and inserts it), but did **not** implement real `sc-network` wire transport or the 4-node docker-compose convergence test — see "Explicitly not done" below.
+Done across two passes this session: first the single-node self-mining loopback (miner → network validation → chain insertion, all in-process), then real `sc-network` wire transport plus wiring both into `argonaut-node` itself, verified live on an actual two-node devnet. Only the 4-node docker-compose convergence test remains — see "Explicitly not done" below.
 
 ### `client/prism-miner` — wired to live chain state
 Before this session, `PrismMiner` mined against a single **static, empty** template built once in `new()` (all-zero parents, empty content) — `refresh()` existed but nothing ever called it with real content, so the miner could run forever without ever reflecting actual chain/mempool state.
@@ -118,13 +118,42 @@ Before this session, `PrismMiner` mined against a single **static, empty** templ
 - A hash-only announcement (no body) is a no-op, as designed (caller is expected to issue a sync request instead).
 - **The full B2 loopback, through the network layer this time**: 40 rounds of mine → announce → validate → insert, asserting every round is accepted, gossiped, and never missing a ref (since it's mining from its own live state, it can never reference something it doesn't already know about), and that the chain invariant holds throughout.
 
-## Explicitly not done for B2 (this is the bulk of the remaining milestone)
+### `client/prism-network/src/wire.rs` (new) — real `sc-network` transport
 
-- **Real `sc-network` wire transport.** `client/prism-network`'s `Cargo.toml` has no dependency on `sc-network` at all, and nothing registers the two protocols named in its own doc comments (`/argonaut/prism/blocks/1` notifications, `/argonaut/prism/sync/1` request/response) with an actual libp2p/litep2p swarm. `handle_announcement` is real, tested logic for "what do I do with a message I already have" -- there is no code yet for "how do messages get from one node's process to another's." This is a substantial, self-contained task on the order of what B0 did for GRANDPA's protocol registration (before it was removed) or bigger.
-- **Wiring into `node/src/service.rs`.** Nothing in the running node currently spawns a `PrismMiner` thread or registers `prism-network`'s protocols. The Substrate chain the node actually runs (B0's PoW chain) and the Prism DAG logic this session tested are not connected to each other or to a live node process at all yet -- everything B1/B2 has verified so far runs inside `cargo test`, not inside `argonaut-node`.
-- **4-node docker-compose convergence test.** Not attempted. Requires the above two items first (there's no way for 4 processes to converge on "an identical leader sequence" without real networking to exchange blocks over).
+Registers the two protocols named in `lib.rs`'s own doc comments, which until now were never actually wired to a swarm:
+
+- **`blocks_protocol_config`/`sync_protocol_config`**: generic over `N: NetworkBackend<B, H>` (the same pattern `sc_consensus_grandpa::grandpa_peers_set_config` and `sc_network_transactions::TransactionsHandlerPrototype::new` use), so they work with either network backend the node can be started with (`NetworkWorker`/libp2p or `Litep2pNetworkBackend`) — confirmed by reading both concrete `NetworkBackend` impls in the vendored `stable2412` source, not guessed from older Substrate docs, since this API has churned across polkadot-sdk versions.
+- **`PrismNetworkWorker`**: an async task owning the `NotificationService` (blocks gossip), the `IncomingRequest` receiver (sync protocol answering), a channel of self-mined blocks from `PrismMiner`, and a `NetworkService` handle for issuing outbound sync requests. Its `process()` method calls the exact same `handle_announcement` that `client/prism-network`'s existing tests already covered — self-mined and network-received blocks share one code path. On `to_fetch` (missing refs), it requests the missing hashes from whichever peer announced the block and recursively re-processes what comes back.
+- Answering sync requests reads from `PrismDb::get_block` -- only ever finds something for blocks that were actually `insert_block`-accepted (not orphans), which is the correct scope for this protocol (orphan bodies are already held in-memory by the requester, not something a *peer* needs to serve back).
+
+**Two real, non-obvious problems found only by actually running two nodes, not by reading the API docs:**
+
+1. **Notification protocol peer slots.** Following GRANDPA/transactions' exact `SetConfig { in_peers: 0, out_peers: 0, non_reserved_mode: Deny }` pattern (their own doc comments describe it as "ride on whatever peers the default sync protocol already connected") produced a protocol that never opened a single substream between two nodes that were nonetheless connected and syncing the main chain fine. GRANDPA/transactions apparently keep their zero-slot protocol's peer set in sync with the default set by explicitly calling `NetworkPeers::add_peers_to_reserved_set` as sync-protocol peers connect/disconnect -- reproducing that mirroring exactly was out of scope for this milestone, so `blocks_protocol_config` instead gives the protocol its own independent, generously-sized peer slot budget (`in_peers`/`out_peers`: 25, `Accept` mode). This manages its own connections against the same peers already known via the peerstore, and reliably opened a substream in live testing (confirmed via added `substream opened with <peer>` logging).
+2. **Peer disconnects from gossip flood.** With `Params::testnet()` (`m=100` voter chains) at its own calibrated difficulty, a single CPU produced dozens of Prism blocks per second — every one gossiped as a separate notification to the one connected peer. In live two-node testing this reliably tripped some reputation/rate limit within 1-2 seconds and dropped the peer connection entirely (both the Prism substream *and* the underlying connection, confirmed via peer count dropping to 0 and never recovering). Fixed empirically by scaling the node's Prism difficulty down ~100x from `Params::testnet()` (`node/src/service.rs`, not the shared `testnet()` constant itself, which other tests still rely on) — with the flood reduced to roughly one block every several seconds, the connection stayed stable and gossip continued for the remainder of the test run.
+
+### `node/src/service.rs` — Prism wired into the actual running node
+
+Previously nothing in `argonaut-node` touched Prism at all -- everything B1/B2 had verified ran inside `cargo test`, never inside the binary. Now, alongside the unrelated B0 PoW chain (separate DB, separate consensus, the two run side by side and don't yet interact -- that's B3's job):
+- Opens a `PrismDb` at `<base-path>/prism` and constructs `PrismChain::with_db(..)` behind an `Arc<Mutex<_>>`.
+- Registers both Prism protocol configs on `net_config` *before* `sc_service::build_network` consumes it by value (this ordering is load-bearing -- confirmed against `substrate/client/service/src/builder.rs`'s own internal sequencing for its built-in protocols).
+- Spawns `PrismNetworkWorker::run()` as a task.
+- If the node is an authority: spawns a `PrismMiner` mining thread (mined blocks flow into the worker over a channel) plus a small periodic thread that rebuilds the mining template from current chain state every 500ms (there's no mempool wired up yet, so only the parent/vote/reference slots ever actually change between refreshes -- transaction-pool integration is out of scope here).
+
+### Verified live (not just `cargo test`)
+
+Built the release binary and ran an actual two-node devnet (same fixed-`--node-key` + `--bootnodes` technique as B0's own two-node test), with `--log prism=info` added logging for accepted-block source and substream open/close events:
+- Confirmed **real cross-node gossip**, not just coincidental parallel mining: node1's self-mined block hash `0x000009d6da1c...` appeared in node2's log tagged `source: <node1's peer ID>` at the same timestamp node1 logged it as `self-mined` -- and symmetrically in the other direction. Exact hash equality between two independently-mined blocks is only possible if one was actually transmitted, not coincidence.
+- After the difficulty fix above, the peer connection (both the main sync protocol and the Prism substream) stayed up for the remainder of a 40+ second run, with gossip continuing to flow throughout.
+- `cargo test --workspace`: still green, 61 tests, 0 failures.
+
+## Explicitly not done for B2
+
+- **4-node docker-compose convergence test.** Not attempted -- the two-node manual test above exercises the same mechanism at smaller scale (real network I/O, real gossip, real acceptance), but the doc's literal B2 acceptance criterion asks for 4 nodes converging on an identical leader sequence after churn, which needs either real docker-compose orchestration or a larger manual multi-process test.
+- **Mirroring the default set's peer membership** (`add_peers_to_reserved_set`) rather than giving the Prism protocol its own independent peer slots -- functionally fine for a small devnet, but not how GRANDPA/transactions actually do it in production, and worth revisiting if peer-slot contention ever becomes a real issue.
+- **No mempool / transaction pool integration** -- `build_template`'s tx slot is always fed `&[]` from the live node; wiring a real pending-transaction source is a separate task.
 - **Persistent per-chain genesis hashes** (still the single shared `H256::zero()` sentinel from B1) -- becomes actually important once multiple independent networks/chain-specs need to coexist, which multi-node testing would surface.
+- **Prism's own difficulty is another hardcoded, untuned constant** (scaled down by a fixed `>>7` from `testnet()`'s values, chosen empirically from a single failed/succeeded live-test cycle, not derived from any target block-time calculation) -- same category of limitation as the B0 PoW difficulty flagged earlier in this doc, just for a different chain. Not re-flagging as a separate action item since the underlying issue (no retargeting, needs real tuning before any serious use) is identical to the one already on record above.
 
-## Next: finish B2
+## Next: finish B2 / start B3
 
-The remaining work is exactly the "Explicitly not done" list above, in roughly this order: (1) register the two real `sc-network` protocols and implement actual gossip flood + sync request/response over them; (2) wire a `PrismMiner` thread and the network protocol handlers into `node/src/service.rs` so a running `argonaut-node` actually produces and gossips Prism blocks (today it only runs the unrelated B0 PoW chain); (3) a multi-node convergence test -- docker-compose as the doc suggests, or a manual multi-process test on one machine (as B0's two-node sync test did) if that proves more practical here.
+The one remaining B2 item is the 4-node convergence test (docker-compose or manual multi-process). After that, B3 is "ledger stage 1 + Substrate bridge; Aura/GRANDPA removed" -- note GRANDPA is already gone (removed in B0) and Aura was too, so B3's remaining scope here is specifically building the bridge that lets confirmed Prism leader blocks actually drive the Substrate chain, replacing the throwaway B0 PoW chain this session's testing has been running against.

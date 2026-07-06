@@ -9,6 +9,12 @@ description = "Prism gossip and sync protocols over sc-network"
 parity-scale-codec = { workspace = true, features = ["std"] }
 argonaut-primitives-prism = { path = "../../primitives/prism" }
 argonaut-prism-chain = { path = "../prism-chain" }
+argonaut-prism-db = { path = "../prism-db" }
+sc-network = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412" }
+sp-runtime = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412" }
+async-channel = "1"
+futures = "0.3"
+log = "0.4"
 
 [dev-dependencies]
 argonaut-prism-miner = { path = "../prism-miner" }

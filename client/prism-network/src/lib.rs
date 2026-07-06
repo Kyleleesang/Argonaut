@@ -11,8 +11,8 @@
 use argonaut_primitives_prism::{validate_block, PrismBlock, Params, H256};
 use parity_scale_codec::{Decode, Encode};
 
-pub const PRISM_BLOCKS_PROTOCOL: &[u8] = b"/argonaut/prism/blocks/1";
-pub const PRISM_SYNC_PROTOCOL: &[u8] = b"/argonaut/prism/sync/1";
+pub const PRISM_BLOCKS_PROTOCOL: &str = "/argonaut/prism/blocks/1";
+pub const PRISM_SYNC_PROTOCOL: &str = "/argonaut/prism/sync/1";
 
 /// Request message on the sync protocol.
 #[derive(Encode, Decode, Clone, Debug)]
@@ -75,6 +75,8 @@ pub fn handle_announcement(
         to_fetch: outcome.missing,
     }
 }
+
+pub mod wire;
 
 #[cfg(test)]
 mod tests;
