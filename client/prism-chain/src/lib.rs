@@ -17,10 +17,20 @@ use argonaut_prism_db::PrismDb;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
-/// Per-proposer accumulated vote count (summed across all voter chains).
+/// Per-proposer votes, one per voter chain that has cast one, keyed by chain
+/// id with the *depth* (on that chain) of the block that cast it. Depth is
+/// needed for stage-1 "conservative k-deep" confirmation (architecture guide
+/// §3.8): a vote only counts toward confirmation once its casting block is at
+/// least `k` blocks behind its chain's current tip.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct VoteInfo {
-    pub total: u64,
+    pub per_chain: HashMap<u16, u64>,
+}
+
+impl VoteInfo {
+    pub fn total(&self) -> u64 {
+        self.per_chain.len() as u64
+    }
 }
 
 /// Outcome of inserting a block — drives network requests and bridge wakeups.
@@ -70,6 +80,11 @@ pub struct PrismChain {
     /// Per voter chain: level → first-seen proposer hash at that level that
     /// this chain has not yet voted on.
     pub unvoted_levels: Vec<BTreeMap<u64, H256>>,
+    /// level → the canonical (first-seen) proposer at that level. Unlike
+    /// `unvoted_levels`, entries here are never removed once a chain votes --
+    /// needed to look up "the proposer at level ℓ" after all chains have
+    /// already voted on it, for confirmation queries.
+    pub level_proposer: BTreeMap<u64, H256>,
     /// Proposer → accumulated vote count.
     pub votes: HashMap<H256, VoteInfo>,
     /// Blocks waiting on missing parent or refs (hash → block).
@@ -109,6 +124,7 @@ impl PrismChain {
             unreferenced_proposers: HashSet::new(),
             known_tx_blocks: HashSet::new(),
             unvoted_levels: vec![BTreeMap::new(); m],
+            level_proposer: BTreeMap::new(),
             votes: HashMap::new(),
             orphans: HashMap::new(),
             voter_meta,
@@ -210,6 +226,7 @@ impl PrismChain {
 
         if level > self.proposer_best_level {
             self.proposer_best_level = level;
+            self.level_proposer.insert(level, hash);
             for chain_map in self.unvoted_levels.iter_mut() {
                 chain_map.insert(level, hash);
             }
@@ -273,15 +290,20 @@ impl PrismChain {
         // `apply` was collected walking new_tip back to the LCA (tip-first
         // order); reverse so votes are re-applied oldest-first.
         for h in apply.into_iter().rev() {
+            let depth = self.voter_meta[&h].depth;
             let votes = self.voter_meta[&h].votes.clone();
             for vh in votes {
-                self.add_vote(chain_idx, vh);
+                self.add_vote(chain_idx, vh, depth);
             }
         }
     }
 
-    fn add_vote(&mut self, chain_idx: usize, proposer_hash: H256) {
-        self.votes.entry(proposer_hash).or_default().total += 1;
+    fn add_vote(&mut self, chain_idx: usize, proposer_hash: H256, depth: u64) {
+        self.votes
+            .entry(proposer_hash)
+            .or_default()
+            .per_chain
+            .insert(chain_idx as u16, depth);
         if let Some(level) = self.proposer_meta.get(&proposer_hash).map(|m| m.level) {
             self.unvoted_levels[chain_idx].remove(&level);
         }
@@ -289,8 +311,8 @@ impl PrismChain {
 
     fn remove_vote(&mut self, chain_idx: usize, proposer_hash: H256) {
         if let Some(info) = self.votes.get_mut(&proposer_hash) {
-            info.total = info.total.saturating_sub(1);
-            if info.total == 0 {
+            info.per_chain.remove(&(chain_idx as u16));
+            if info.per_chain.is_empty() {
                 self.votes.remove(&proposer_hash);
             }
         }
@@ -357,7 +379,7 @@ impl PrismChain {
     /// Current incrementally-maintained vote totals, in the same shape as
     /// [`PrismChain::recount_votes`] for direct comparison in tests.
     pub fn vote_totals(&self) -> HashMap<H256, u64> {
-        self.votes.iter().map(|(k, v)| (*k, v.total)).collect()
+        self.votes.iter().map(|(k, v)| (*k, v.total())).collect()
     }
 
     /// The level of a known proposer block, or `None` if `hash` hasn't been
@@ -387,6 +409,47 @@ impl PrismChain {
             .map(|(hash, _)| (*hash, totals.get(hash).copied().unwrap_or(0)))
             .max_by_key(|(hash, votes)| (*votes, *hash))
             .map(|(hash, _)| hash)
+    }
+
+    /// Stage-1 "conservative k-deep" leader confirmation (architecture guide
+    /// §3.8, paper §4.1's conservative policy): `level` is confirmed once
+    /// *every* voter chain has cast its vote for the canonical proposer at
+    /// that level, and every one of those votes is at least `k` blocks behind
+    /// its chain's current tip (deep enough that reversing it via reorg would
+    /// need to out-race `k` blocks of work -- the same safety margin as a
+    /// k-confirmation Bitcoin payment). Deliberately conservative/unanimous
+    /// rather than a fast probabilistic threshold, matching "stage 1,
+    /// correctness-first, latency ~Bitcoin" from the guide; stage 2's
+    /// confidence-interval rule (Def. 4.5) is a separate, faster mechanism
+    /// layered on top later.
+    ///
+    /// Returns `None` if the level has no proposer yet, if any chain hasn't
+    /// voted on it yet, or if any chain's vote isn't `k`-deep yet -- callers
+    /// should treat all three as "not confirmed yet," not an error.
+    pub fn confirmed_leader_at_level(&self, level: u64, k: u64) -> Option<H256> {
+        let proposer = *self.level_proposer.get(&level)?;
+        let m = self.params.m_voter_chains as usize;
+
+        for chain_idx in 0..m {
+            if self.unvoted_levels[chain_idx].contains_key(&level) {
+                return None; // this chain hasn't voted on this level yet
+            }
+        }
+
+        let info = self.votes.get(&proposer)?;
+        if info.per_chain.len() != m {
+            return None; // shouldn't happen once every chain has voted, but guard defensively
+        }
+        let all_k_deep = info.per_chain.iter().all(|(&chain_idx, &depth)| {
+            let tip_depth = self.voter_tips[chain_idx as usize].1;
+            tip_depth.saturating_sub(depth) >= k
+        });
+
+        if all_k_deep {
+            Some(proposer)
+        } else {
+            None
+        }
     }
 
     fn persist(&self, block: &PrismBlock) {

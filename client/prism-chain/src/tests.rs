@@ -173,8 +173,8 @@ fn voter_chain_linear_growth_matches_recount() {
     let v1 = ins(&mut chain, genesis, vec![p1_hash], &mut nonce);
     ins(&mut chain, v1, vec![p2_hash], &mut nonce);
 
-    assert_eq!(chain.votes.get(&p1_hash).map(|v| v.total), Some(1));
-    assert_eq!(chain.votes.get(&p2_hash).map(|v| v.total), Some(1));
+    assert_eq!(chain.votes.get(&p1_hash).map(|v| v.total()), Some(1));
+    assert_eq!(chain.votes.get(&p2_hash).map(|v| v.total()), Some(1));
     assert_eq!(chain.vote_totals(), chain.recount_votes());
 }
 
@@ -202,8 +202,8 @@ fn voter_chain_reorg_rolls_back_and_reapplies_votes() {
     let a2 = ins(&mut chain, a1, vec![p2_hash], &mut nonce);
 
     assert_eq!(chain.voter_tips[0].0, a2);
-    assert_eq!(chain.votes.get(&p1_hash).map(|v| v.total), Some(1));
-    assert_eq!(chain.votes.get(&p2_hash).map(|v| v.total), Some(1));
+    assert_eq!(chain.votes.get(&p1_hash).map(|v| v.total()), Some(1));
+    assert_eq!(chain.votes.get(&p2_hash).map(|v| v.total()), Some(1));
 
     // Competing fork from genesis, longer: b1 (votes p3) -> b2 (votes p4) -> b3 (no votes).
     let b1 = ins(&mut chain, genesis, vec![p3_hash], &mut nonce);
@@ -217,8 +217,8 @@ fn voter_chain_reorg_rolls_back_and_reapplies_votes() {
     assert!(chain.votes.get(&p1_hash).is_none());
     assert!(chain.votes.get(&p2_hash).is_none());
     // New votes applied.
-    assert_eq!(chain.votes.get(&p3_hash).map(|v| v.total), Some(1));
-    assert_eq!(chain.votes.get(&p4_hash).map(|v| v.total), Some(1));
+    assert_eq!(chain.votes.get(&p3_hash).map(|v| v.total()), Some(1));
+    assert_eq!(chain.votes.get(&p4_hash).map(|v| v.total()), Some(1));
 
     // p1/p2's levels should be unvoted again on chain 0; p3/p4's should not.
     assert_eq!(chain.unvoted_levels[0].get(&1), Some(&p1_hash));
@@ -240,18 +240,18 @@ fn reorg_on_one_chain_does_not_affect_another() {
     // Chain 1 votes for p1 and must stay untouched by chain 0's reorg below.
     let v_chain1 = voter_block(50, 1, genesis, vec![p1_hash]);
     chain.insert_block(v_chain1);
-    assert_eq!(chain.votes.get(&p1_hash).map(|v| v.total), Some(1));
+    assert_eq!(chain.votes.get(&p1_hash).map(|v| v.total()), Some(1));
 
     let mut nonce = 0;
     ins(&mut chain, genesis, vec![p1_hash], &mut nonce);
-    assert_eq!(chain.votes.get(&p1_hash).map(|v| v.total), Some(2));
+    assert_eq!(chain.votes.get(&p1_hash).map(|v| v.total()), Some(2));
 
     // A longer competing fork on chain 0 that casts no votes at all.
     let c1 = ins(&mut chain, genesis, vec![], &mut nonce);
     ins(&mut chain, c1, vec![], &mut nonce);
 
     // Chain 0's vote for p1 is rolled back; chain 1's vote remains.
-    assert_eq!(chain.votes.get(&p1_hash).map(|v| v.total), Some(1));
+    assert_eq!(chain.votes.get(&p1_hash).map(|v| v.total()), Some(1));
     assert_eq!(chain.vote_totals(), chain.recount_votes());
 }
 
@@ -287,9 +287,9 @@ fn vote_totals_match_recount_after_every_insertion_in_a_long_scripted_sequence()
     assert_eq!(chain.voter_tips[0].1, 3);
     assert!(chain.votes.get(&proposers[0]).is_none());
     assert!(chain.votes.get(&proposers[1]).is_none());
-    assert_eq!(chain.votes.get(&proposers[2]).map(|v| v.total), Some(1));
-    assert_eq!(chain.votes.get(&proposers[3]).map(|v| v.total), Some(1));
-    assert_eq!(chain.votes.get(&proposers[4]).map(|v| v.total), Some(1));
+    assert_eq!(chain.votes.get(&proposers[2]).map(|v| v.total()), Some(1));
+    assert_eq!(chain.votes.get(&proposers[3]).map(|v| v.total()), Some(1));
+    assert_eq!(chain.votes.get(&proposers[4]).map(|v| v.total()), Some(1));
 
     // Extend further, then a fresh, longer-still fork from genesis again.
     let b4 = ins(&mut chain, b3, vec![proposers[5]], &mut nonce);
@@ -351,4 +351,59 @@ fn leader_at_level_tie_breaks_deterministically_by_hash() {
     // asserting a specific hash literal that would be brittle to change.
     let expected = std::cmp::max(p1_hash, p1b_hash);
     assert_eq!(chain.leader_at_level(1), Some(expected));
+}
+
+#[test]
+fn confirmed_leader_at_level_none_for_unknown_level() {
+    let chain = PrismChain::new(params());
+    assert_eq!(chain.confirmed_leader_at_level(1, 0), None);
+}
+
+#[test]
+fn confirmed_leader_at_level_requires_every_chain_to_vote() {
+    let mut chain = PrismChain::new(params());
+    let genesis = genesis_sentinel();
+
+    let p1 = proposer_block(1, genesis, vec![], vec![]);
+    let p1_hash = block_hash(&p1.header);
+    chain.insert_block(p1);
+
+    // Only 3 of the 4 chains (params() uses m=4) vote.
+    chain.insert_block(voter_block(101, 0, genesis, vec![p1_hash]));
+    chain.insert_block(voter_block(102, 1, genesis, vec![p1_hash]));
+    chain.insert_block(voter_block(103, 2, genesis, vec![p1_hash]));
+
+    assert_eq!(chain.confirmed_leader_at_level(1, 0), None);
+}
+
+#[test]
+fn confirmed_leader_at_level_becomes_confirmed_once_votes_are_k_deep() {
+    let mut chain = PrismChain::new(params());
+    let genesis = genesis_sentinel();
+
+    let p1 = proposer_block(1, genesis, vec![], vec![]);
+    let p1_hash = block_hash(&p1.header);
+    chain.insert_block(p1);
+
+    let mut nonce = 300u64;
+    for c in 0..4u16 {
+        nonce += 1;
+        chain.insert_block(voter_block(nonce, c, genesis, vec![p1_hash]));
+    }
+    // Every chain has voted (satisfies k=0), but each vote is only depth 1 on
+    // a depth-1 tip -- 0 blocks behind, so not yet 3-deep.
+    assert_eq!(chain.confirmed_leader_at_level(1, 0), Some(p1_hash));
+    assert_eq!(chain.confirmed_leader_at_level(1, 3), None);
+
+    // Extend every chain 3 further (voteless) blocks, so the original vote is
+    // now exactly 3 blocks behind each chain's tip.
+    for _ in 0..3 {
+        for c in 0..4u16 {
+            let tip = chain.voter_tips[c as usize].0;
+            nonce += 1;
+            chain.insert_block(voter_block(nonce, c, tip, vec![]));
+        }
+    }
+
+    assert_eq!(chain.confirmed_leader_at_level(1, 3), Some(p1_hash));
 }
