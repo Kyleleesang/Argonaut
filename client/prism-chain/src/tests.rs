@@ -307,3 +307,48 @@ fn vote_totals_match_recount_after_every_insertion_in_a_long_scripted_sequence()
     }
     assert_eq!(chain.vote_totals(), chain.recount_votes());
 }
+
+#[test]
+fn leader_at_level_returns_none_before_any_proposer_exists() {
+    let chain = PrismChain::new(params());
+    assert_eq!(chain.leader_at_level(1), None);
+}
+
+#[test]
+fn leader_at_level_picks_the_proposer_with_more_votes() {
+    let mut chain = PrismChain::new(params());
+    let genesis = genesis_sentinel();
+
+    let p1 = proposer_block(1, genesis, vec![], vec![]);
+    let p1_hash = block_hash(&p1.header);
+    chain.insert_block(p1);
+    let p1b = proposer_block(2, genesis, vec![], vec![]);
+    let p1b_hash = block_hash(&p1b.header);
+    chain.insert_block(p1b);
+
+    // p1_hash gets votes from chains 0 and 1; p1b_hash gets one vote from chain 2.
+    chain.insert_block(voter_block(101, 0, genesis, vec![p1_hash]));
+    chain.insert_block(voter_block(102, 1, genesis, vec![p1_hash]));
+    chain.insert_block(voter_block(103, 2, genesis, vec![p1b_hash]));
+
+    assert_eq!(chain.leader_at_level(1), Some(p1_hash));
+}
+
+#[test]
+fn leader_at_level_tie_breaks_deterministically_by_hash() {
+    let mut chain = PrismChain::new(params());
+    let genesis = genesis_sentinel();
+
+    let p1 = proposer_block(1, genesis, vec![], vec![]);
+    let p1_hash = block_hash(&p1.header);
+    chain.insert_block(p1);
+    let p1b = proposer_block(2, genesis, vec![], vec![]);
+    let p1b_hash = block_hash(&p1b.header);
+    chain.insert_block(p1b);
+
+    // Neither proposer has any votes -- 0 == 0, so the tie-break (larger hash)
+    // decides. Compute independently and check it matches, rather than
+    // asserting a specific hash literal that would be brittle to change.
+    let expected = std::cmp::max(p1_hash, p1b_hash);
+    assert_eq!(chain.leader_at_level(1), Some(expected));
+}

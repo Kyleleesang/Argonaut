@@ -2,13 +2,13 @@
 
 Tracks status against [`ARGONAUT_ARCHITECTURE_GUIDE.md`](./ARGONAUT_ARCHITECTURE_GUIDE.md) §3 ("Implementation B — Prism Consensus") and its milestones in §3.9. Follows [`IMPLEMENTATION_A_PROGRESS.md`](./IMPLEMENTATION_A_PROGRESS.md) per the doc's §6 build order. Lives on the `Base` branch.
 
-## Status: B0 and B1 complete and tested. B2 mostly done: miner, real sc-network gossip/sync protocols, and node wiring all work and were verified live on a two-node devnet; the 4-node docker-compose convergence test is the one remaining piece.
+## Status: B0, B1, B2 complete and tested. B3 not started.
 
 | §3.9 milestone | Status |
 |---|---|
 | **B0** (optional): Aura → `sc-consensus-pow` swap, blake3 `PowAlgorithm`, two-node devnet mines and syncs | ✅ done this session (see below) |
 | **B1**: primitives + db + chain state machine, fully unit-tested offline; property test vote counts == recount-from-scratch | ✅ done this session (see below) |
-| **B2**: miner + network, single-node self-mining loopback, then 4-node docker-compose convergence | 🟡 mostly done this session — miner, real `sc-network` gossip + sync protocols, and `argonaut-node` wiring all implemented and verified on a live two-node devnet (see below); only the 4-node docker-compose convergence test itself remains |
+| **B2**: miner + network, single-node self-mining loopback, then 4-node docker-compose convergence | ✅ done this session (see below) — 4-node convergence verified via a manual multi-process devnet with a real kill/restart churn cycle rather than docker-compose itself (see "Explicitly not done" for the distinction) |
 | B3: ledger stage 1 + Substrate bridge; Aura/GRANDPA removed | ⬜ not started |
 | B4: stage-2 fast confirmation + adversarial simulation | ⬜ not started |
 | B5: pruning | ⬜ not started |
@@ -146,14 +146,32 @@ Built the release binary and ran an actual two-node devnet (same fixed-`--node-k
 - After the difficulty fix above, the peer connection (both the main sync protocol and the Prism substream) stayed up for the remainder of a 40+ second run, with gossip continuing to flow throughout.
 - `cargo test --workspace`: still green, 61 tests, 0 failures.
 
+## B2 — finishing the 4-node convergence test
+
+### `PrismChain::leader_at_level` (new, small addition)
+
+The doc's B2 acceptance criterion talks about nodes converging on an "identical leader sequence" — but nothing in `PrismChain` could answer "who's the leader at level ℓ" at all yet (B1 built vote totals and DAG traversal, not a leader query). Added `leader_at_level(&self, level) -> Option<H256>`: the proposer at `level` with the most votes, tie-broken by hash for determinism. This is explicitly a **raw vote-count snapshot**, not the stage-1 "conservative k-deep" *confirmed* leader the doc specifies for B3 §3.8 (that needs per-vote depth tracking that doesn't exist yet — `VoteInfo` was trimmed to a flat `total: u64` in B1 and deliberately deferred this). Good enough to make "convergence" a checkable, deterministic property for B2's own test: since `PrismChain::insert_block` already guarantees vote totals converge to the same values regardless of arrival order (B1's core invariant, re-proven every session since), two nodes that have accepted the identical *set* of blocks must produce identical `leader_at_level` results for every level, by construction. 3 new tests (`client/prism-chain/src/tests.rs`): returns `None` before any proposer exists, picks the higher-vote proposer, and tie-breaks deterministically by hash when votes are equal.
+
+### Live 4-node devnet with a real churn cycle
+
+Built the release binary and ran 4 `argonaut-node` processes (fixed `--node-key`s, mesh-bootnoded to each other) — all 4 fully connected (3 peers each) on both the main sync protocol and the Prism gossip protocol, mining and gossiping Prism blocks concurrently.
+
+**Churn**: killed node3 mid-run (`kill`, not `--dev`'s ephemeral state — its `PrismDb`/chain data directory was preserved, modeling a realistic restart-after-downtime rather than a fresh cold join), let the remaining 3 nodes continue mining and gossiping without it, then restarted node3 pointed at the same data directory and bootnodes.
+
+**Result**: node3 reconnected on both protocols (peer count recovered to 3, Prism substreams reopened with all three peers, confirmed via the `substream opened with <peer>` logging added earlier this session), and bidirectional gossip resumed correctly: a block node3 mined *after* reconnecting appeared in node1's log tagged with node3's exact peer ID at the identical timestamp node3 logged it as self-mined, and symmetrically a block node1 mined after node3's reconnect appeared in node3's log tagged with node1's peer ID. This is the same "exact hash equality proves transmission, not coincidence" argument used for the two-node test, now demonstrated surviving an actual node restart.
+
+**Honest scope of what this proves**: it demonstrates gossip resilience across a real disconnect/reconnect cycle — a node dropping out and coming back correctly rejoins the mesh and exchanges blocks bidirectionally from that point forward. It does **not** demonstrate a node recovering the *specific* blocks mined by others strictly during its downtime, because there's no historical backfill/initial-sync counterpart for Prism data (`PrismNetworkWorker`'s sync protocol only serves reactive orphan-fetch requests — "I have a block that references something I don't have" — not "catch me up on everything I missed"). A node whose downtime is longer than however long its peers keep relevant state reachable via orphan-chasing would end up with a genuinely divergent (though internally self-consistent) DAG. This is a real, scoped-out gap, not a bug; see below.
+
 ## Explicitly not done for B2
 
-- **4-node docker-compose convergence test.** Not attempted -- the two-node manual test above exercises the same mechanism at smaller scale (real network I/O, real gossip, real acceptance), but the doc's literal B2 acceptance criterion asks for 4 nodes converging on an identical leader sequence after churn, which needs either real docker-compose orchestration or a larger manual multi-process test.
+- **Full historical backfill / initial sync for Prism state.** As described just above — the only catch-up mechanism is reactive orphan-fetching triggered by an incoming block referencing something unknown, not a real "sync from genesis" or "sync from last-known-height" flow the way the main Substrate chain already has (via `sc-network-sync`). A node offline for any nontrivial period, or one joining fresh with an empty `PrismDb`, will not converge with the rest of the network on its own.
+- **Docker-compose specifically.** The convergence test above used 4 plain OS processes on one machine rather than actual container orchestration — functionally exercises the same real-networking code path (this is genuine loopback-interface TCP/libp2p traffic between 4 independent processes, not an in-process simulation), but doesn't produce the reusable `docker-compose.yml` artifact the doc's own phrasing suggests. Worth adding later if this devnet needs to be handed to someone else to run.
 - **Mirroring the default set's peer membership** (`add_peers_to_reserved_set`) rather than giving the Prism protocol its own independent peer slots -- functionally fine for a small devnet, but not how GRANDPA/transactions actually do it in production, and worth revisiting if peer-slot contention ever becomes a real issue.
 - **No mempool / transaction pool integration** -- `build_template`'s tx slot is always fed `&[]` from the live node; wiring a real pending-transaction source is a separate task.
 - **Persistent per-chain genesis hashes** (still the single shared `H256::zero()` sentinel from B1) -- becomes actually important once multiple independent networks/chain-specs need to coexist, which multi-node testing would surface.
 - **Prism's own difficulty is another hardcoded, untuned constant** (scaled down by a fixed `>>7` from `testnet()`'s values, chosen empirically from a single failed/succeeded live-test cycle, not derived from any target block-time calculation) -- same category of limitation as the B0 PoW difficulty flagged earlier in this doc, just for a different chain. Not re-flagging as a separate action item since the underlying issue (no retargeting, needs real tuning before any serious use) is identical to the one already on record above.
+- **Per-vote depth tracking for real stage-1 k-deep confirmation** -- `leader_at_level` above is a raw vote-count snapshot on purpose; the actual "conservative k-deep" confirmation rule (architecture guide §3.8) is B3's job and needs `VoteInfo` to track each vote's originating voter-chain depth, not just a flat total.
 
-## Next: finish B2 / start B3
+## Next: B3
 
-The one remaining B2 item is the 4-node convergence test (docker-compose or manual multi-process). After that, B3 is "ledger stage 1 + Substrate bridge; Aura/GRANDPA removed" -- note GRANDPA is already gone (removed in B0) and Aura was too, so B3's remaining scope here is specifically building the bridge that lets confirmed Prism leader blocks actually drive the Substrate chain, replacing the throwaway B0 PoW chain this session's testing has been running against.
+B3 is "ledger stage 1 + Substrate bridge; Aura/GRANDPA removed" -- GRANDPA and Aura are already gone (removed in B0), so the remaining scope here is specifically: (1) per-vote depth tracking + the real conservative k-deep confirmation rule on top of today's raw `leader_at_level`; (2) `BuildLedger` (dedupe + order transactions from a confirmed leader sequence's referenced tx blocks); (3) the actual bridge that imports one Substrate block per confirmed leader level, replacing the throwaway B0 PoW chain this session's testing has been running against; (4) a byte-identical-chains CI-style test across nodes, per the doc's own B3 acceptance criterion.

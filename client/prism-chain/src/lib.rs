@@ -370,6 +370,25 @@ impl PrismChain {
         self.proposer_meta.get(hash).map(|m| m.level)
     }
 
+    /// The current leader at `level`: the proposer at that level with the
+    /// most votes, tie-broken by hash for determinism. `None` if no proposer
+    /// is known at that level yet.
+    ///
+    /// This is a raw vote-count snapshot, not the stage-1 "conservative
+    /// k-deep" *confirmed* leader (architecture guide §3.8) -- votes here
+    /// aren't filtered by how deep the casting voter block is on its own
+    /// chain, so it can still change as more votes arrive. That distinction
+    /// (and the per-vote depth tracking it needs) is B3's job.
+    pub fn leader_at_level(&self, level: u64) -> Option<H256> {
+        let totals = self.vote_totals();
+        self.proposer_meta
+            .iter()
+            .filter(|(_, meta)| meta.level == level)
+            .map(|(hash, _)| (*hash, totals.get(hash).copied().unwrap_or(0)))
+            .max_by_key(|(hash, votes)| (*votes, *hash))
+            .map(|(hash, _)| hash)
+    }
+
     fn persist(&self, block: &PrismBlock) {
         if let Some(db) = &self.db {
             let _ = db.insert_block(block);
