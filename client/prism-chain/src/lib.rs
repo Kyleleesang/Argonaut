@@ -82,7 +82,10 @@ pub struct PrismChain {
 /// Shared genesis sentinel used by every voter chain and the proposer tree.
 /// Not a real mined block; seeded directly into the metadata maps so parent
 /// lookups for the first real block on each chain resolve without special-casing.
-fn genesis_sentinel() -> H256 {
+///
+/// Public so callers building mining templates (e.g. `client/prism-miner`) can
+/// use it as the starting parent before any real proposer/voter block exists.
+pub fn genesis_sentinel() -> H256 {
     H256::zero()
 }
 
@@ -355,6 +358,16 @@ impl PrismChain {
     /// [`PrismChain::recount_votes`] for direct comparison in tests.
     pub fn vote_totals(&self) -> HashMap<H256, u64> {
         self.votes.iter().map(|(k, v)| (*k, v.total)).collect()
+    }
+
+    /// The level of a known proposer block, or `None` if `hash` hasn't been
+    /// inserted (or is the genesis sentinel). Used by `client/prism-miner` to
+    /// pick the deepest unreferenced proposer as a new proposer/tx block's parent.
+    pub fn proposer_level(&self, hash: &H256) -> Option<u64> {
+        if *hash == genesis_sentinel() {
+            return None;
+        }
+        self.proposer_meta.get(hash).map(|m| m.level)
     }
 
     fn persist(&self, block: &PrismBlock) {

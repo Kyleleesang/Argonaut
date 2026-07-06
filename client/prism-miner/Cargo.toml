@@ -8,6 +8,7 @@ description = "Prism PoW mining loop — assembles superblock templates, runs so
 [dependencies]
 parity-scale-codec = { workspace = true, features = ["std"] }
 argonaut-primitives-prism = { path = "../../primitives/prism" }
+argonaut-prism-chain = { path = "../prism-chain" }
 blake3 = { workspace = true, features = ["std"] }
 arc-swap = { workspace = true }
 sp-core = { workspace = true, features = ["std"] }

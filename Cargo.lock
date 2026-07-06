@@ -336,6 +336,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "argonaut-primitives-prism",
+ "argonaut-prism-chain",
  "blake3",
  "parity-scale-codec",
  "sp-core",
@@ -347,7 +348,9 @@ version = "0.1.0"
 dependencies = [
  "argonaut-primitives-prism",
  "argonaut-prism-chain",
+ "argonaut-prism-miner",
  "parity-scale-codec",
+ "sp-core",
 ]
 
 [[package]]

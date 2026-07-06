@@ -9,3 +9,7 @@ description = "Prism gossip and sync protocols over sc-network"
 parity-scale-codec = { workspace = true, features = ["std"] }
 argonaut-primitives-prism = { path = "../../primitives/prism" }
 argonaut-prism-chain = { path = "../prism-chain" }
+
+[dev-dependencies]
+argonaut-prism-miner = { path = "../prism-miner" }
+sp-core = { workspace = true, features = ["std"] }

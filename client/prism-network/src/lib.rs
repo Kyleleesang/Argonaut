@@ -75,3 +75,6 @@ pub fn handle_announcement(
         to_fetch: outcome.missing,
     }
 }
+
+#[cfg(test)]
+mod tests;
