@@ -29,7 +29,7 @@ pub struct AggSchemeId {
 
 /// An aggregated signature bundle submitted as a single extrinsic.
 /// One STARK proof attests that all inner txs were signed by their respective XMSS keys.
-#[derive(Encode, Decode, TypeInfo, Clone, Debug)]
+#[derive(Encode, Decode, TypeInfo, Clone, PartialEq, Eq, Debug)]
 pub struct AggBundle {
     pub scheme: AggSchemeId,
     /// Inner extrinsics in canonical (= proof circuit) order.

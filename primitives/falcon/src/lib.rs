@@ -9,20 +9,20 @@
 
 extern crate alloc;
 
-use alloc::vec::Vec;
-use parity_scale_codec::{Decode, Encode};
+use parity_scale_codec::{Decode, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
+use sp_core::{bounded::BoundedVec, ConstU32};
 
 pub const FALCON512_PK_LEN: usize = 897;
 pub const FALCON512_SIG_MAX_LEN: usize = 752;
 
 /// A Falcon-512 public key (897 bytes, BoundedVec for SCALE safety).
-#[derive(Encode, Decode, TypeInfo, Clone, PartialEq, Eq, Debug)]
-pub struct FalconPublic(pub Vec<u8>);
+#[derive(Encode, Decode, MaxEncodedLen, TypeInfo, Clone, PartialEq, Eq, Debug)]
+pub struct FalconPublic(pub BoundedVec<u8, ConstU32<897>>);
 
 /// A Falcon-512 detached signature (up to 752 bytes).
-#[derive(Encode, Decode, TypeInfo, Clone, PartialEq, Eq, Debug)]
-pub struct FalconSignature(pub Vec<u8>);
+#[derive(Encode, Decode, MaxEncodedLen, TypeInfo, Clone, PartialEq, Eq, Debug)]
+pub struct FalconSignature(pub BoundedVec<u8, ConstU32<752>>);
 
 /// Runtime-facing signature envelope — supports bootstrap mode and registry mode.
 #[derive(Encode, Decode, TypeInfo, Clone, PartialEq, Eq, Debug)]
@@ -54,14 +54,14 @@ pub mod falcon_crypto {
     pub fn verify(sig: &[u8], msg: &[u8], pk: &[u8]) -> bool {
         #[cfg(feature = "std")]
         {
-            use fn_dsa_vrfy::{verify_key_size, verify_signature, FalconVariant};
+            use fn_dsa_vrfy::{VerifyingKey, VerifyingKeyStandard, DOMAIN_NONE, HASH_ID_RAW};
             if pk.len() != super::FALCON512_PK_LEN {
                 return false;
             }
-            if !verify_key_size(FalconVariant::Falcon512, pk) {
-                return false;
+            match VerifyingKeyStandard::decode(pk) {
+                Some(vk) => vk.verify(sig, &DOMAIN_NONE, &HASH_ID_RAW, msg),
+                None => false,
             }
-            verify_signature(FalconVariant::Falcon512, pk, msg, sig).unwrap_or(false)
         }
         #[cfg(not(feature = "std"))]
         {

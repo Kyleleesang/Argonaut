@@ -1,4 +1,3 @@
-//! Node-specific RPC extensions.
 use std::sync::Arc;
 
 use jsonrpsee::RpcModule;
@@ -8,12 +7,9 @@ use sp_api::ProvideRuntimeApi;
 use sp_block_builder::BlockBuilder;
 use sp_blockchain::{Error as BlockChainError, HeaderBackend, HeaderMetadata};
 
-pub use sc_rpc_api::DenyUnsafe;
-
 pub struct FullDeps<C, P> {
     pub client: Arc<C>,
     pub pool: Arc<P>,
-    pub deny_unsafe: DenyUnsafe,
 }
 
 pub fn create_full<C, P>(
@@ -32,9 +28,9 @@ where
     use substrate_frame_rpc_system::{System, SystemApiServer};
 
     let mut module = RpcModule::new(());
-    let FullDeps { client, pool, deny_unsafe } = deps;
+    let FullDeps { client, pool } = deps;
 
-    module.merge(System::new(client.clone(), pool, deny_unsafe).into_rpc())?;
+    module.merge(System::new(client.clone(), pool).into_rpc())?;
     module.merge(TransactionPayment::new(client).into_rpc())?;
 
     Ok(module)

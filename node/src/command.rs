@@ -5,7 +5,8 @@ use crate::{
     service,
 };
 use frame_benchmarking_cli::{BenchmarkCmd, ExtrinsicFactory, SUBSTRATE_REFERENCE_HARDWARE};
-use argonaut_runtime::{Block, EXISTENTIAL_DEPOSIT};
+use argonaut_runtime::{opaque::Block, EXISTENTIAL_DEPOSIT};
+use clap::Parser;
 use sc_cli::SubstrateCli;
 use sc_service::PartialComponents;
 use sp_keyring::Sr25519Keyring;
@@ -93,14 +94,20 @@ pub fn run() -> sc_cli::Result<()> {
                             return Err("Runtime benchmarking wasn't enabled when building the node. \
                                 Use `--features runtime-benchmarks`.".into());
                         }
-                        cmd.run_with_spec::<sp_io::SubstrateHostFunctions>(Some(
-                            config.chain_spec.cloned_box(),
+                        cmd.run_with_spec::<sp_runtime::traits::HashingFor<Block>, ()>(Some(
+                            config.chain_spec,
                         ))
                     },
                     BenchmarkCmd::Block(cmd) => {
                         let PartialComponents { client, .. } = service::new_partial(&config)?;
                         cmd.run(client)
                     },
+                    #[cfg(not(feature = "runtime-benchmarks"))]
+                    BenchmarkCmd::Storage(_) => Err(
+                        "Storage benchmarking can be enabled with `--features runtime-benchmarks`."
+                            .into(),
+                    ),
+                    #[cfg(feature = "runtime-benchmarks")]
                     BenchmarkCmd::Storage(cmd) => {
                         let PartialComponents { client, backend, .. } =
                             service::new_partial(&config)?;
@@ -111,7 +118,14 @@ pub fn run() -> sc_cli::Result<()> {
                     BenchmarkCmd::Overhead(cmd) => {
                         let PartialComponents { client, .. } = service::new_partial(&config)?;
                         let ext_builder = RemarkBuilder::new(client.clone());
-                        cmd.run(config, client, inherent_benchmark_data()?, Vec::new(), &ext_builder)
+                        cmd.run(
+                            config.chain_spec.name().into(),
+                            client,
+                            inherent_benchmark_data()?,
+                            Vec::new(),
+                            &ext_builder,
+                            false,
+                        )
                     },
                     BenchmarkCmd::Extrinsic(cmd) => {
                         let PartialComponents { client, .. } = service::new_partial(&config)?;
@@ -141,9 +155,6 @@ pub fn run() -> sc_cli::Result<()> {
                 Ok((cmd.run::<Block, sp_io::SubstrateHostFunctions>(config), task_manager))
             })
         },
-        #[cfg(not(feature = "try-runtime"))]
-        Some(Subcommand::TryRuntime) => Err("TryRuntime wasn't enabled when building the node. \
-            Use `--features try-runtime`.".into()),
         Some(Subcommand::ChainInfo(cmd)) => {
             let runner = cli.create_runner(cmd)?;
             runner.sync_run(|config| cmd.run::<Block>(&config))
@@ -151,7 +162,17 @@ pub fn run() -> sc_cli::Result<()> {
         None => {
             let runner = cli.create_runner(&cli.run)?;
             runner.run_node_until_exit(|config| async move {
-                service::new_full(config).map_err(sc_cli::Error::Service)
+                match config.network.network_backend {
+                    sc_network::config::NetworkBackendType::Libp2p =>
+                        service::new_full::<sc_network::NetworkWorker<
+                            Block,
+                            <Block as sp_runtime::traits::Block>::Hash,
+                        >>(config)
+                        .map_err(sc_cli::Error::Service),
+                    sc_network::config::NetworkBackendType::Litep2p =>
+                        service::new_full::<sc_network::Litep2pNetworkBackend>(config)
+                            .map_err(sc_cli::Error::Service),
+                }
             })
         },
     }

@@ -19,7 +19,7 @@ pub mod pallet {
     use argonaut_primitives_falcon::{falcon_crypto, FalconPublic};
     use frame_support::{
         pallet_prelude::*,
-        traits::Currency,
+        traits::{Currency, ReservableCurrency},
     };
     use frame_system::pallet_prelude::*;
 
@@ -32,7 +32,7 @@ pub mod pallet {
     #[pallet::config]
     pub trait Config: frame_system::Config {
         type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
-        type Currency: Currency<Self::AccountId>;
+        type Currency: ReservableCurrency<Self::AccountId>;
         /// Storage deposit for registering a Falcon public key (~900 bytes of on-chain state).
         /// Refundable on deregistration.
         #[pallet::constant]
@@ -78,8 +78,8 @@ pub mod pallet {
 
             // Verify the pk's hash matches the signer's account id.
             let pk_hash = falcon_crypto::pk_hash(&pk.0);
-            let account_bytes: &[u8] = who.as_ref();
-            ensure!(pk_hash == account_bytes[..32], Error::<T>::KeyMismatch);
+            let account_bytes = who.encode();
+            ensure!(pk_hash.as_slice() == account_bytes.as_slice(), Error::<T>::KeyMismatch);
 
             T::Currency::reserve(&who, T::KeyDeposit::get())
                 .map_err(|_| Error::<T>::InsufficientBalance)?;
