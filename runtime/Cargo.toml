@@ -48,6 +48,12 @@ sp-version         = { git = "https://github.com/paritytech/polkadot-sdk", branc
 
 hex-literal = { version = "0.4", optional = true }
 
+[dev-dependencies]
+fn-dsa = { workspace = true }
+rand_core = "0.6"
+rand_chacha = "0.3"
+sp-io = { workspace = true, features = ["std"] }
+
 [build-dependencies]
 substrate-wasm-builder = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412" }
 
@@ -93,6 +99,7 @@ runtime-benchmarks = [
     "pallet-balances/runtime-benchmarks",
     "pallet-grandpa/runtime-benchmarks",
     "pallet-timestamp/runtime-benchmarks",
+    "pallet-falcon-registry/runtime-benchmarks",
     "sp-runtime/runtime-benchmarks",
     "hex-literal",
 ]

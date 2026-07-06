@@ -15,6 +15,14 @@ pub enum Subcommand {
     #[command(subcommand)]
     Key(sc_cli::KeySubcommand),
 
+    /// Falcon-512 key management (generate/inspect keystore files). Stock `key` above
+    /// only supports ed25519/sr25519/ecdsa; Falcon needs its own subcommand.
+    #[command(subcommand)]
+    FalconKey(crate::keygen::FalconKeySubcommand),
+
+    /// Sign a payload offline with a Falcon-512 keystore (bootstrap-mode only).
+    FalconSign(crate::falcon_sign::FalconSignCmd),
+
     /// Build a chain specification.
     BuildSpec(sc_cli::BuildSpecCmd),
 

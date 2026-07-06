@@ -212,14 +212,21 @@ version = "0.1.0"
 dependencies = [
  "argonaut-primitives-falcon",
  "argonaut-runtime",
+ "blake3",
+ "chacha20poly1305",
  "clap",
+ "fn-dsa",
  "frame-benchmarking",
  "frame-benchmarking-cli",
  "frame-system",
  "futures",
+ "hex",
  "jsonrpsee 0.24.11",
  "pallet-transaction-payment",
  "pallet-transaction-payment-rpc",
+ "parity-scale-codec",
+ "rand_chacha 0.3.1",
+ "rand_core 0.6.4",
  "sc-basic-authorship",
  "sc-chain-spec",
  "sc-cli",
@@ -237,6 +244,7 @@ dependencies = [
  "sc-telemetry",
  "sc-transaction-pool",
  "sc-transaction-pool-api",
+ "serde",
  "serde_json",
  "sp-api",
  "sp-block-builder",
@@ -345,6 +353,7 @@ name = "argonaut-runtime"
 version = "0.1.0"
 dependencies = [
  "argonaut-primitives-falcon",
+ "fn-dsa",
  "frame-benchmarking",
  "frame-executive",
  "frame-support",
@@ -363,6 +372,8 @@ dependencies = [
  "pallet-transaction-payment",
  "pallet-transaction-payment-rpc-runtime-api",
  "parity-scale-codec",
+ "rand_chacha 0.3.1",
+ "rand_core 0.6.4",
  "scale-info",
  "sp-api",
  "sp-block-builder",
@@ -371,6 +382,7 @@ dependencies = [
  "sp-core",
  "sp-genesis-builder",
  "sp-inherents",
+ "sp-io",
  "sp-offchain",
  "sp-runtime",
  "sp-session",
@@ -3617,6 +3629,9 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "hex-conservative"
@@ -6240,6 +6255,7 @@ name = "pallet-falcon-registry"
 version = "0.1.0"
 dependencies = [
  "argonaut-primitives-falcon",
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "pallet-balances",

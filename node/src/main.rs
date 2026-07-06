@@ -7,6 +7,8 @@ mod service;
 mod benchmarking;
 mod cli;
 mod command;
+mod falcon_sign;
+mod keygen;
 mod rpc;
 
 fn main() -> sc_cli::Result<()> {

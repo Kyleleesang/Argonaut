@@ -35,6 +35,8 @@ pub fn run() -> sc_cli::Result<()> {
 
     match &cli.subcommand {
         Some(Subcommand::Key(cmd)) => cmd.run(&cli),
+        Some(Subcommand::FalconKey(cmd)) => cmd.run().map_err(sc_cli::Error::Input),
+        Some(Subcommand::FalconSign(cmd)) => cmd.run().map_err(sc_cli::Error::Input),
         Some(Subcommand::BuildSpec(cmd)) => {
             let runner = cli.create_runner(cmd)?;
             runner.sync_run(|config| cmd.run(config.chain_spec, config.network))

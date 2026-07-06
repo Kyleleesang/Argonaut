@@ -4,6 +4,11 @@
 #[cfg(feature = "std")]
 include!(concat!(env!("OUT_DIR"), "/wasm_binary.rs"));
 
+mod extensions;
+pub use extensions::CheckFalconSignature;
+#[cfg(test)]
+mod tests;
+
 use frame_support::{
     construct_runtime, parameter_types,
     traits::{ConstBool, ConstU128, ConstU32, ConstU64, ConstU8},
@@ -244,6 +249,9 @@ pub type Address = sp_runtime::MultiAddress<AccountId, ()>;
 pub type Header = generic::Header<BlockNumber, BlakeTwo256>;
 pub type Block = generic::Block<Header, UncheckedExtrinsic>;
 pub type SignedExtra = (
+    // Must run first: for `General`-preamble (registry-mode) extrinsics it authorizes
+    // the origin itself, and everything after it assumes an already-authorized signer.
+    CheckFalconSignature,
     frame_system::CheckNonZeroSender<Runtime>,
     frame_system::CheckSpecVersion<Runtime>,
     frame_system::CheckTxVersion<Runtime>,
@@ -273,6 +281,7 @@ mod benches {
         [frame_system, SystemBench::<Runtime>]
         [pallet_balances, Balances]
         [pallet_timestamp, Timestamp]
+        [pallet_falcon_registry, FalconRegistry]
     );
 }
 

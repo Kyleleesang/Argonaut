@@ -131,6 +131,9 @@ pub fn create_benchmark_extrinsic(
 		.map(|c| c / 2)
 		.unwrap_or(2) as u64;
 	let extra: runtime::SignedExtra = (
+		// Bootstrap-mode (classic `Signed` preamble) needs no extension work: the
+		// signature is already checked via `Verify::verify` before extensions run.
+		runtime::CheckFalconSignature::disabled(),
 		frame_system::CheckNonZeroSender::<runtime::Runtime>::new(),
 		frame_system::CheckSpecVersion::<runtime::Runtime>::new(),
 		frame_system::CheckTxVersion::<runtime::Runtime>::new(),
@@ -148,6 +151,7 @@ pub fn create_benchmark_extrinsic(
 		call.clone(),
 		extra.clone(),
 		(
+			(),
 			(),
 			runtime::VERSION.spec_version,
 			runtime::VERSION.transaction_version,
