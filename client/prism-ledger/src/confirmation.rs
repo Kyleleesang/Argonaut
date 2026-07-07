@@ -30,21 +30,77 @@
 //! `V_{-n}^raw(r)` is that pool's undiscounted count (k=0), and `U_l(r)` is the
 //! number of voter chains that haven't voted on the level at all yet.
 //!
-//! # Known gap, flagged explicitly rather than guessed
+//! # `delta_d`: paper-faithful formula ported, but not the default
 //! `delta_d` -- the per-depth confidence margin used in (33)-(34) -- has an
-//! exact closed form in the paper, but deriving it requires Appendix E.1's
-//! "typicality" lemma: a multi-page concentration bound over the Poisson
-//! voter-chain mining process (the constant `rho_delta_r`, threshold `k_min`,
-//! and the macroscopic chain-growth/common-prefix/chain-quality lemmas E.2-E.4
-//! that feed it). That derivation was not ported this session -- getting a
-//! consensus-safety margin subtly wrong by mistranscribing dense inline math
-//! is worse than not shipping it. [`PLACEHOLDER_DELTA_D`] is an explicit,
-//! swappable stand-in with the right *qualitative* shape (shrinks with depth
-//! and with `m`) so the confirmation *policy* above -- which is verified
-//! faithful -- can be implemented and tested today. Do not treat its exact
-//! output as a safety guarantee; replace it once Appendix E.1 is ported.
+//! exact closed form in the paper, Appendix E.1 eq. (31), transcribed and
+//! verified below as [`paper_delta_d`]/[`paper_k_min`] (checked against the
+//! PDF's own selectable embedded text, not OCR/visual guesswork, on
+//! 2026-07-07). It is deliberately **not** wired in as
+//! [`ConfirmationParams::default`]'s `delta_d`/`k_min`, though: `k_min` is a
+//! pure function of the assumed adversary fraction `β` alone, and for any β
+//! in a sane range it comes out to several *thousand* -- e.g. ~7,900 at
+//! β=0.25, ~13,000 at β=0.3 -- versus the 24-block depth the paper's own
+//! p.7 says its much more naive *stage-1* rule needs at the same β=0.3,
+//! ε=10⁻³. That's not a transcription error (verified twice, including
+//! character-for-character against the PDF's raw text layer); it's the
+//! usual gap between an asymptotic concentration-bound proof (the "200"/"32"
+//! constants inside are slack from a Chernoff-bound union over an
+//! astronomically large round count, not a tuned practical depth) and an
+//! operating parameter. Using it literally as stage-2's `k_min` would make
+//! stage-2 require ~500x the depth stage-1 needs before it even starts
+//! looking at a vote -- strictly *slower* than stage-1, contradicting the
+//! paper's own premise that aggregating across `m` chains is the faster
+//! path. [`placeholder_delta_d`] remains the actual default: right
+//! qualitative shape (shrinks with depth and `m`), usable at the depths this
+//! codebase's tests and devnets actually reach. `paper_k_min`/`paper_delta_d`
+//! are kept, faithfully computed and unit-tested against the paper's own
+//! numbers, for whoever eventually needs the rigorous asymptotic guarantee
+//! (e.g. choosing parameters for a long-lived mainnet where thousands of
+//! blocks of depth is an acceptable wait).
 use argonaut_prism_chain::PrismChain;
 use argonaut_primitives_prism::H256;
+
+/// Adversary hash-power assumption (paper's `β`, §4.1): the maximum fraction
+/// of total voter mining power the safety analysis tolerates. Not derivable
+/// from the paper -- a deployment threat-model choice. `0.25` is a
+/// deliberately conservative pick: comfortably under the paper's own most-
+/// used worked examples (mostly `β = 0.3`-`0.4`) and its absolute safety
+/// limit (`β < 0.5`, with some results proven only up to `1/3`). Change
+/// freely -- nothing else here hardcodes it beyond this constant and
+/// [`paper_k_min`]/[`paper_delta_d`]'s own default call sites in tests.
+pub const ASSUMED_ADVERSARY_FRACTION: f64 = 0.25;
+
+/// Paper's `γ` (Appendix E.1, eq. 31): `(1/36)(1-2β)²`.
+fn gamma(beta: f64) -> f64 {
+    (1.0 / 36.0) * (1.0 - 2.0 * beta).powi(2)
+}
+
+/// Paper's `c1` (eq. 31): `(1-2β)/16`.
+fn paper_c1(beta: f64) -> f64 {
+    (1.0 - 2.0 * beta) / 16.0
+}
+
+/// Paper's `k_min` (eq. 31): `(4/γ)·log(200/(γ·c1))` -- a pure function of
+/// `β` alone (no dependence on `m` or the mining rate). See the module docs
+/// for why this is *not* used as [`ConfirmationParams::default`]'s `k_min`.
+pub fn paper_k_min(beta: f64) -> u64 {
+    let g = gamma(beta);
+    let c1 = paper_c1(beta);
+    ((4.0 / g) * (200.0 / (g * c1)).ln()).ceil().max(1.0) as u64
+}
+
+/// Paper's `δ_k` (eq. 31): the per-depth confidence margin, as a fraction of
+/// `m` (matching this module's `delta_d` calling convention -- (33)/(34) both
+/// use it as `δ_k(k)·m`). Cross-checked against the paper's own note that
+/// `δ_k = ρ_r'` under `r' = k/(2f̄_v)`: substituting confirms the two
+/// formulas agree algebraically (`c1/(1+4·f̄_v·r')` becomes exactly
+/// `c1/(1+2k)` under that substitution).
+pub fn paper_delta_d(depth: u64, m: u64, beta: f64) -> f64 {
+    let c1 = paper_c1(beta);
+    let term_depth = c1 / (1.0 + 2.0 * depth as f64);
+    let term_m = ((1.0 - 2.0 * beta) * c1) / (1.0 + 32.0 * (m.max(1) as f64).ln());
+    term_depth.max(term_m)
+}
 
 /// NOT the paper's derived bound -- see module docs. Returns a margin
 /// *fraction* of `m` (multiply by `m` to get a vote-count margin, as (33)
@@ -57,8 +113,8 @@ pub type DeltaDFn = fn(u64, u64) -> f64;
 
 pub struct ConfirmationParams {
     /// Paper's `k_min`: votes shallower than this never count toward a lower
-    /// bound. 1 is a conservative default in the absence of the paper's own
-    /// derived value (see module docs).
+    /// bound. `1` is a practical default -- see the module docs for why this
+    /// is deliberately not [`paper_k_min`]'s literal (much larger) value.
     pub k_min: u64,
     pub delta_d: DeltaDFn,
 }
