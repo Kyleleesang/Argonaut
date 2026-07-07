@@ -19,6 +19,14 @@ pub enum BlockStatus {
     Pending = 0,
     Valid = 1,
     Orphan = 2,
+    /// B5 pruning: the block's body has been deleted from `BLOCKS`, but the
+    /// hash is still recognized as "known, once-accepted" rather than
+    /// "never seen." `PrismChain::has_block` and the B-6 backfill path both
+    /// consult this -- without it, a pruned block's hash would look
+    /// identical to an unknown one, causing backfill to re-request it
+    /// forever and `insert_block` to (incorrectly) treat any re-delivery as
+    /// new.
+    Pruned = 3,
 }
 
 pub struct PrismDb {
@@ -80,6 +88,50 @@ impl PrismDb {
                 PrismBlock::decode(&mut &bytes[..]).map(Some).map_err(|_| DbError::Codec)
             }
         }
+    }
+
+    /// Record `hash` as an emitted tx hash (B5 pruning prerequisite: the
+    /// durable half of `PrismLedger::emitted_tx_hashes`, so restart-recovery
+    /// no longer needs to re-derive dedup state by re-reading tx bodies that
+    /// may since have been pruned). Key-only marker CF; value is unused.
+    pub fn put_emitted_tx_hash(&self, hash: &[u8; 32]) -> Result<(), DbError> {
+        let cf = self.db.cf_handle(EMITTED_TX_HASH).expect("EMITTED_TX_HASH CF missing");
+        self.db.put_cf(cf, hash, [])?;
+        Ok(())
+    }
+
+    /// Every tx hash ever emitted, in arbitrary order -- order doesn't
+    /// matter since the caller only ever folds these into a `HashSet`.
+    pub fn iter_emitted_tx_hashes(&self) -> impl Iterator<Item = [u8; 32]> + '_ {
+        let cf = self.db.cf_handle(EMITTED_TX_HASH).expect("EMITTED_TX_HASH CF missing");
+        self.db
+            .iterator_cf(cf, rocksdb::IteratorMode::Start)
+            .filter_map(|res| res.ok())
+            .filter_map(|(key, _)| key.as_ref().try_into().ok())
+    }
+
+    /// Raw-bytes get/put, for callers (e.g. `PrismChain`'s `ChainCheckpoint`)
+    /// that own their own encoding rather than using one of this crate's
+    /// typed helpers (`put_u64`/`put_h256`/`put_u256`).
+    pub fn put_bytes(&self, cf_name: &str, key: &[u8], val: &[u8]) -> Result<(), DbError> {
+        let cf = self.db.cf_handle(cf_name).unwrap_or_else(|| panic!("{cf_name} CF missing"));
+        self.db.put_cf(cf, key, val)?;
+        Ok(())
+    }
+
+    pub fn get_bytes(&self, cf_name: &str, key: &[u8]) -> Result<Option<Vec<u8>>, DbError> {
+        let cf = self.db.cf_handle(cf_name).unwrap_or_else(|| panic!("{cf_name} CF missing"));
+        Ok(self.db.get_cf(cf, key)?)
+    }
+
+    /// Delete a block's body (B5 pruning). Does not touch `BLOCK_STATUS` --
+    /// callers should overwrite that separately with `BlockStatus::Pruned`
+    /// so the hash is still recognizably "known, just pruned" rather than
+    /// indistinguishable from a hash that was never seen.
+    pub fn delete_block_body(&self, hash: &H256) -> Result<(), DbError> {
+        let cf = self.db.cf_handle(BLOCKS).expect("BLOCKS CF missing");
+        self.db.delete_cf(cf, hash.as_bytes())?;
+        Ok(())
     }
 
     pub fn get_block_status(&self, hash: &H256) -> Result<Option<BlockStatus>, DbError> {
@@ -215,18 +267,18 @@ mod tests {
     #[test]
     fn u64_round_trip() {
         let (_dir, db) = tmp_db();
-        db.put_u64(PROPOSER_TREE_LEVEL, b"key", 42).unwrap();
-        assert_eq!(db.get_u64(PROPOSER_TREE_LEVEL, b"key").unwrap(), Some(42));
-        assert_eq!(db.get_u64(PROPOSER_TREE_LEVEL, b"missing").unwrap(), None);
+        db.put_u64(CHAIN_CHECKPOINT, b"key", 42).unwrap();
+        assert_eq!(db.get_u64(CHAIN_CHECKPOINT, b"key").unwrap(), Some(42));
+        assert_eq!(db.get_u64(CHAIN_CHECKPOINT, b"missing").unwrap(), None);
     }
 
     #[test]
     fn h256_round_trip() {
         let (_dir, db) = tmp_db();
         let val = H256::from([7u8; 32]);
-        db.put_h256(PROPOSER_NODE_VOTE, b"key", &val).unwrap();
-        assert_eq!(db.get_h256(PROPOSER_NODE_VOTE, b"key").unwrap(), Some(val));
-        assert_eq!(db.get_h256(PROPOSER_NODE_VOTE, b"missing").unwrap(), None);
+        db.put_h256(PROPOSER_LEDGER_ORDER, b"key", &val).unwrap();
+        assert_eq!(db.get_h256(PROPOSER_LEDGER_ORDER, b"key").unwrap(), Some(val));
+        assert_eq!(db.get_h256(PROPOSER_LEDGER_ORDER, b"missing").unwrap(), None);
     }
 
     #[test]

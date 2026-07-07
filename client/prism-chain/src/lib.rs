@@ -15,7 +15,8 @@
 use argonaut_primitives_prism::{
     block_hash, BlockContent, ChainId, DifficultyRetarget, Params, PrismBlock, H256,
 };
-use argonaut_prism_db::{columns, PrismDb};
+use argonaut_prism_db::{columns, BlockStatus, PrismDb};
+use parity_scale_codec::{Decode, Encode};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
@@ -46,7 +47,7 @@ pub struct InsertOutcome {
 
 /// Lightweight per-voter-block metadata kept for fast tree traversal
 /// (fork-choice, LCA search, vote replay) without needing a DB round-trip.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Encode, Decode)]
 struct VoterMeta {
     parent: H256,
     depth: u64,
@@ -55,7 +56,7 @@ struct VoterMeta {
 }
 
 /// Lightweight per-proposer-block metadata.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Encode, Decode)]
 struct ProposerMeta {
     level: u64,
 }
@@ -106,7 +107,61 @@ pub struct PrismChain {
     /// scratch as new blocks arrive post-restart) and re-persisting blocks
     /// that are, by construction, already the ones being read back from `db`.
     replaying: bool,
+    /// B5 pruning prerequisite: counts accepted (non-replay) blocks since
+    /// the last `ChainCheckpoint` write, to drive `CHECKPOINT_INTERVAL`.
+    blocks_since_checkpoint: u64,
+    /// B5 pruning: the highest confirmed level whose proposer/tx-block
+    /// bodies have already been swept by `prune`. Not persisted in
+    /// `ChainCheckpoint` -- restarting at 0 just makes the next `prune`
+    /// call re-walk (and no-op delete, since the bodies are already gone)
+    /// the whole confirmed history once more, a bounded one-time cost, not
+    /// a correctness gap.
+    last_body_pruned_level: u64,
 }
+
+/// B5 pruning prerequisite: a point-in-time snapshot of every in-memory DAG
+/// index, so `PrismChain::with_db` can restart in O(live window) instead of
+/// O(total historical blocks) -- and, once pruning actually deletes old
+/// blocks from `BLOCKS`, so restart is possible *at all* past the pruned
+/// frontier (full replay would otherwise try to re-derive state from bodies
+/// that no longer exist).
+///
+/// SCALE-encoded as one blob under a single `columns::CHAIN_CHECKPOINT` key
+/// (not a dedicated CF per field, unlike the removed 13-CF prism-rust
+/// schema -- see `prism-db::columns`'s module doc for why). `HashMap`/
+/// `HashSet` fields are represented as `Vec` pairs, matching the same
+/// convention `client/prism-network`'s wire messages already use for
+/// sending `PrismChain` collections over the network (`SyncResponse::Status`).
+///
+/// Deliberately excludes `orphans`: an orphan was never persisted to
+/// `BLOCKS` in the first place (see `persist`'s doc comment on the
+/// accepted-only write discipline), so it wouldn't survive a restart even
+/// before this checkpoint existed -- B-6's backfill re-fetches whatever a
+/// restarted node is still missing.
+#[derive(Clone, Debug, Default, Encode, Decode)]
+struct ChainCheckpoint {
+    version: u32,
+    voter_tips: Vec<(H256, u64)>,
+    proposer_best_level: u64,
+    voter_meta: Vec<(H256, VoterMeta)>,
+    proposer_meta: Vec<(H256, ProposerMeta)>,
+    votes: Vec<(H256, Vec<(u16, u64)>)>,
+    unvoted_levels: Vec<Vec<(u64, H256)>>,
+    level_proposer: Vec<(u64, H256)>,
+    unreferenced_tx_blocks: Vec<H256>,
+    unreferenced_proposers: Vec<H256>,
+    known_tx_blocks: Vec<H256>,
+}
+
+const CHAIN_CHECKPOINT_VERSION: u32 = 1;
+
+/// How many accepted (non-replay) blocks pass between automatic checkpoints.
+/// The checkpoint is O(total live-window state), so writing it on every
+/// single insert would be quadratic write amplification as the DAG grows;
+/// a node that crashes between checkpoints just replays a bounded number
+/// (`< CHECKPOINT_INTERVAL`) of extra blocks from `BLOCKS` on restart via
+/// `with_db`'s `has_block`-gated replay loop, not a correctness issue.
+const CHECKPOINT_INTERVAL: u64 = 256;
 
 /// Shared genesis sentinel used by every voter chain and the proposer tree.
 /// Not a real mined block; seeded directly into the metadata maps so parent
@@ -146,6 +201,8 @@ impl PrismChain {
             db: None,
             retarget: DifficultyRetarget::new(),
             replaying: false,
+            blocks_since_checkpoint: 0,
+            last_body_pruned_level: 0,
         }
     }
 
@@ -156,19 +213,26 @@ impl PrismChain {
     /// restart resumes from wherever retargeting last left off instead of
     /// `params`'s initial guess every time.
     ///
-    /// B-7: replays every previously-accepted block from `db` to rebuild the
+    /// B-7: replays previously-accepted blocks from `db` to rebuild the
     /// in-memory DAG indices (`proposer_meta`, `voter_meta`, `votes`,
     /// `voter_tips`, ...) that `PrismChain::new` alone leaves empty --
     /// without this, a restarted node forgets its entire DAG and starts
     /// mining/voting from genesis again while the bridge (`node/src/bridge.rs`)
     /// still believes those levels were never confirmed, silently
     /// re-deriving and re-importing Substrate blocks that already exist.
-    /// Feeding order doesn't matter: only ever-*accepted* blocks are
-    /// persisted (see `insert_block`'s content-type arms), so every
-    /// dependency of a stored block is itself guaranteed to be in the
-    /// stored set, and `insert_block`'s orphan-cascade (`drain_orphans`,
-    /// called after every acceptance, recursively) resolves the full set
-    /// to a fixed point regardless of the order it's fed in.
+    ///
+    /// B5 pruning prerequisite: loads the last `ChainCheckpoint` first (if
+    /// any), then only replays blocks `has_block` doesn't already recognize
+    /// -- both so restart is O(blocks since the last checkpoint) instead of
+    /// O(total history), and so it still works once pruning starts deleting
+    /// old bodies out of `BLOCKS` (full unconditional replay would try to
+    /// re-derive state from bodies that no longer exist). Feeding order
+    /// still doesn't matter: every dependency of a stored block is itself
+    /// guaranteed to be in the stored set (or already covered by the
+    /// checkpoint), and `insert_block`'s orphan-cascade (`drain_orphans`,
+    /// called after every acceptance, recursively) resolves the remainder
+    /// to a fixed point regardless of the order it's fed in -- the same
+    /// argument as before, just starting from a non-empty base state.
     pub fn with_db(mut params: Params, db: Arc<PrismDb>) -> Self {
         if let Ok(Some(target)) = db.get_u256(columns::CURRENT_DIFFICULTY_TARGET, b"current") {
             params.set_combined_target(target);
@@ -176,11 +240,95 @@ impl PrismChain {
         let mut chain = Self::new(params);
         chain.db = Some(db.clone());
         chain.replaying = true;
+
+        if let Some(checkpoint) = db
+            .get_bytes(columns::CHAIN_CHECKPOINT, b"current")
+            .ok()
+            .flatten()
+            .and_then(|bytes| ChainCheckpoint::decode(&mut &bytes[..]).ok())
+        {
+            chain.load_checkpoint(checkpoint);
+        }
         for block in db.iter_blocks() {
-            chain.insert_block(block);
+            let hash = block_hash(&block.header);
+            if !chain.has_block(&hash) {
+                chain.insert_block(block);
+            }
         }
         chain.replaying = false;
         chain
+    }
+
+    fn to_checkpoint(&self) -> ChainCheckpoint {
+        ChainCheckpoint {
+            version: CHAIN_CHECKPOINT_VERSION,
+            voter_tips: self.voter_tips.clone(),
+            proposer_best_level: self.proposer_best_level,
+            voter_meta: self.voter_meta.iter().map(|(h, m)| (*h, m.clone())).collect(),
+            proposer_meta: self.proposer_meta.iter().map(|(h, m)| (*h, m.clone())).collect(),
+            votes: self
+                .votes
+                .iter()
+                .map(|(h, v)| (*h, v.per_chain.iter().map(|(&c, &d)| (c, d)).collect()))
+                .collect(),
+            unvoted_levels: self
+                .unvoted_levels
+                .iter()
+                .map(|m| m.iter().map(|(&l, &h)| (l, h)).collect())
+                .collect(),
+            level_proposer: self.level_proposer.iter().map(|(&l, &h)| (l, h)).collect(),
+            unreferenced_tx_blocks: self.unreferenced_tx_blocks.iter().copied().collect(),
+            unreferenced_proposers: self.unreferenced_proposers.iter().copied().collect(),
+            known_tx_blocks: self.known_tx_blocks.iter().copied().collect(),
+        }
+    }
+
+    fn load_checkpoint(&mut self, cp: ChainCheckpoint) {
+        self.voter_tips = cp.voter_tips;
+        self.proposer_best_level = cp.proposer_best_level;
+        self.voter_meta = cp.voter_meta.into_iter().collect();
+        self.proposer_meta = cp.proposer_meta.into_iter().collect();
+        self.votes = cp
+            .votes
+            .into_iter()
+            .map(|(h, per_chain)| (h, VoteInfo { per_chain: per_chain.into_iter().collect() }))
+            .collect();
+        self.unvoted_levels = cp.unvoted_levels.into_iter().map(|v| v.into_iter().collect()).collect();
+        self.level_proposer = cp.level_proposer.into_iter().collect();
+        self.unreferenced_tx_blocks = cp.unreferenced_tx_blocks.into_iter().collect();
+        self.unreferenced_proposers = cp.unreferenced_proposers.into_iter().collect();
+        self.known_tx_blocks = cp.known_tx_blocks.into_iter().collect();
+    }
+
+    /// Write a fresh `ChainCheckpoint` to `db` now, unconditionally. Called
+    /// periodically (`maybe_checkpoint`) and after every `prune`; also safe
+    /// (cheap relative to a crash-recovery replay) to call from the node on
+    /// clean shutdown, though no caller does that yet -- a purely
+    /// perf-motivated follow-up, not a correctness gap, since an unclean
+    /// shutdown just replays up to `CHECKPOINT_INTERVAL` extra blocks.
+    pub fn checkpoint_now(&mut self) {
+        self.blocks_since_checkpoint = 0;
+        if let Some(db) = &self.db {
+            let cp = self.to_checkpoint();
+            let _ = db.put_bytes(columns::CHAIN_CHECKPOINT, b"current", &cp.encode());
+        }
+    }
+
+    /// Called from every accepted-block arm of `insert_block` (mirroring
+    /// `observe_for_retarget`'s placement) -- checkpoints every
+    /// `CHECKPOINT_INTERVAL` blocks. Suppressed during replay for the same
+    /// reason `observe_for_retarget` is: replay order doesn't match live
+    /// arrival order, and replay already starts from (at worst) a slightly
+    /// stale checkpoint that's about to be caught up to and re-written once
+    /// live traffic resumes.
+    fn maybe_checkpoint(&mut self) {
+        if self.replaying {
+            return;
+        }
+        self.blocks_since_checkpoint += 1;
+        if self.blocks_since_checkpoint >= CHECKPOINT_INTERVAL {
+            self.checkpoint_now();
+        }
     }
 
     /// Feed a newly-*accepted* block's timestamp to the difficulty retarget
@@ -222,6 +370,7 @@ impl PrismChain {
                 self.known_tx_blocks.insert(hash);
                 self.unreferenced_tx_blocks.insert(hash);
                 self.observe_for_retarget(timestamp_ms);
+                self.maybe_checkpoint();
             }
 
             BlockContent::Proposer { tx_refs, prop_refs } => {
@@ -251,6 +400,7 @@ impl PrismChain {
                     self.unreferenced_proposers.insert(hash);
                     outcome.may_confirm = true;
                     self.observe_for_retarget(timestamp_ms);
+                    self.maybe_checkpoint();
                 } else {
                     self.orphans.insert(hash, block);
                 }
@@ -264,6 +414,13 @@ impl PrismChain {
                     return outcome;
                 }
                 if !self.voter_meta.contains_key(voter_parent) {
+                    if self.is_pruned(voter_parent) {
+                        // The parent is gone for good (B5 pruning), not
+                        // merely not-yet-received -- orphaning this block
+                        // would leave it in `orphans` forever waiting on a
+                        // fetch that can never resolve. Reject outright.
+                        return outcome;
+                    }
                     outcome.missing.push(*voter_parent);
                     self.orphans.insert(hash, block);
                 } else {
@@ -271,6 +428,7 @@ impl PrismChain {
                     self.persist(&block);
                     outcome.may_confirm = true;
                     self.observe_for_retarget(timestamp_ms);
+                    self.maybe_checkpoint();
                 }
             }
         }
@@ -493,19 +651,142 @@ impl PrismChain {
     }
 
     /// True if `hash` is already known to this chain: an accepted proposer,
-    /// voter, or transaction block, or a still-orphaned one. Used by
-    /// `client/prism-network`'s backfill path (B-6) to filter a peer's
-    /// `Status` response down to genuinely-unknown hashes before requesting
-    /// them -- re-running `insert_block` on an *already-accepted* proposer
-    /// is not idempotent (it would wrongly re-add an already-referenced
-    /// proposer to `unreferenced_proposers`), so this check must happen
-    /// before, not instead of, relying on `insert_block`'s own missing-ref
-    /// bookkeeping (which only ever adds genuinely-unknown refs).
+    /// voter, or transaction block (in-memory, or pruned out of the
+    /// in-memory maps but tombstoned `BlockStatus::Pruned` in `db`), or a
+    /// still-orphaned one. Used by `client/prism-network`'s backfill path
+    /// (B-6) to filter a peer's `Status` response down to genuinely-unknown
+    /// hashes before requesting them -- re-running `insert_block` on an
+    /// *already-accepted* proposer is not idempotent (it would wrongly
+    /// re-add an already-referenced proposer to `unreferenced_proposers`),
+    /// so this check must happen before, not instead of, relying on
+    /// `insert_block`'s own missing-ref bookkeeping (which only ever adds
+    /// genuinely-unknown refs).
+    ///
+    /// B5 pruning: the DB fallback is load-bearing, not defensive. Once
+    /// `prune` removes a voter block's `voter_meta` entry, the in-memory
+    /// checks alone would report `false` for a hash that's still perfectly
+    /// real (just evicted from the hot maps) -- without the tombstone
+    /// check, B-6 backfill would treat every pruned hash as unknown and
+    /// re-request it from peers forever, and any re-delivery would then hit
+    /// the same non-idempotency this method exists to prevent.
     pub fn has_block(&self, hash: &H256) -> bool {
-        self.proposer_meta.contains_key(hash)
+        if self.proposer_meta.contains_key(hash)
             || self.voter_meta.contains_key(hash)
             || self.known_tx_blocks.contains(hash)
             || self.orphans.contains_key(hash)
+        {
+            return true;
+        }
+        self.is_pruned(hash)
+    }
+
+    /// True if `hash` is specifically tombstoned `BlockStatus::Pruned` in
+    /// `db` -- distinct from `has_block` (which also covers still-live
+    /// in-memory state) because callers like `insert_block`'s voter arm
+    /// need to distinguish "genuinely missing, go fetch it" from "gone for
+    /// good, reject rather than orphan forever."
+    fn is_pruned(&self, hash: &H256) -> bool {
+        self.db
+            .as_ref()
+            .map(|db| matches!(db.get_block_status(hash), Ok(Some(BlockStatus::Pruned))))
+            .unwrap_or(false)
+    }
+
+    /// B5 pruning (design resolved 2026-07-07, `docs/IMPLEMENTATION_AB_FIXPLAN.md`'s
+    /// "Then: B5 (pruning)" section). Trims two independent things bounded
+    /// by two independent inputs -- do not conflate them:
+    ///
+    /// - **Voter blocks**, bounded by `k_prune` alone. Both confirmation
+    ///   stages (`prism-ledger`) read only `chain.votes` (the incrementally
+    ///   maintained totals) and `voter_tips`, never voter-block history, so
+    ///   pruning `voter_meta` is a complete no-op on vote accounting by
+    ///   construction -- this method never touches `self.votes`. What
+    ///   `k_prune` actually bounds is *reorg processability*:
+    ///   `reorg_voter_chain`'s LCA walk indexes `voter_meta` directly and
+    ///   would panic if a live reorg ever needed to cross the pruned
+    ///   frontier, so `k_prune` must be chosen deep enough that this is
+    ///   never expected (the same assumption stage-1 confirmation's own
+    ///   k-deep rule already relies on -- pick `k_prune` a large multiple,
+    ///   e.g. ≥10x, of that k). `insert_block`'s voter arm rejects rather
+    ///   than orphans a block whose parent is tombstoned pruned, so a fork
+    ///   attempting to cross the frontier is dropped, not stuck retrying
+    ///   forever.
+    /// - **Proposer/tx-block bodies**, bounded by `ledger_confirmed_level`
+    ///   (the caller's job to supply -- `node/src/bridge.rs` owns both this
+    ///   chain and `PrismLedger`, and reads `PrismLedger::confirmed_tip()`;
+    ///   `prism-chain` deliberately never depends on `prism-ledger`, same
+    ///   crate-boundary discipline AF-2 established). `proposer_meta` and
+    ///   `known_tx_blocks` are kept forever -- every confirmation query
+    ///   (`proposers_at_level`, `leader_at_level`, `level_proposer`) only
+    ///   ever needs level/existence, never body content -- only the `BLOCKS`
+    ///   body rows for the *canonical confirmed leader sequence*'s subtree
+    ///   are dropped, mirroring `PrismLedger::build_ledger_delta_for_leader`'s
+    ///   own DFS (which has, by the time a level is confirmed, already
+    ///   walked and durably deduped everything those bodies could produce).
+    ///
+    /// Both leave a small, deliberately-unswept, *bounded* remainder behind
+    /// (in the same practical-compromise spirit as B-3's `k_min`, not a
+    /// correctness gap): voter blocks on an already-abandoned fork, deep
+    /// enough to predate the frontier, aren't reachable by walking a live
+    /// tip backward and are left in `voter_meta`; sibling (non-canonical)
+    /// proposers at a confirmed level keep their bodies, since only the
+    /// leader's own subtree is walked. Exact sweeping of either would need
+    /// a per-chain/per-level reverse index this port doesn't maintain.
+    ///
+    /// Checkpoints immediately afterward (`checkpoint_now`) so a crash right
+    /// after pruning doesn't leave the next restart's replay trying to walk
+    /// bodies this call just deleted.
+    pub fn prune(&mut self, k_prune: u64, ledger_confirmed_level: u64) {
+        self.prune_voter_blocks(k_prune);
+        self.prune_confirmed_bodies(ledger_confirmed_level);
+        self.checkpoint_now();
+    }
+
+    fn prune_voter_blocks(&mut self, k_prune: u64) {
+        let Some(db) = self.db.clone() else { return };
+        let tips = self.voter_tips.clone();
+        for (tip_hash, tip_depth) in tips {
+            let frontier = tip_depth.saturating_sub(k_prune);
+            if frontier == 0 {
+                continue; // this chain isn't deep enough yet for anything to be prunable
+            }
+            // Walk from the tip back to the frontier without touching
+            // anything still inside the retained window.
+            let mut current = tip_hash;
+            loop {
+                let Some(meta) = self.voter_meta.get(&current) else { break };
+                if meta.depth <= frontier {
+                    break;
+                }
+                current = meta.parent;
+            }
+            // `current` is now the deepest still-retained block. Everything
+            // from here back to (but not including) the genesis sentinel is
+            // prunable.
+            loop {
+                let Some(meta) = self.voter_meta.get(&current).cloned() else { break };
+                if meta.depth == 0 {
+                    break; // never prune the genesis sentinel
+                }
+                self.voter_meta.remove(&current);
+                let _ = db.delete_block_body(&current);
+                let _ = db.set_block_status(&current, BlockStatus::Pruned);
+                current = meta.parent;
+            }
+        }
+    }
+
+    fn prune_confirmed_bodies(&mut self, ledger_confirmed_level: u64) {
+        let Some(db) = self.db.clone() else { return };
+        if ledger_confirmed_level <= self.last_body_pruned_level {
+            return;
+        }
+        let mut visited = HashSet::new();
+        for level in (self.last_body_pruned_level + 1)..=ledger_confirmed_level {
+            let Some(&leader) = self.level_proposer.get(&level) else { continue };
+            prune_proposer_subtree_bodies(&db, &leader, &mut visited);
+        }
+        self.last_body_pruned_level = ledger_confirmed_level;
     }
 
     fn persist(&self, block: &PrismBlock) {
@@ -516,6 +797,33 @@ impl PrismChain {
             let _ = db.insert_block(block);
         }
     }
+}
+
+/// Delete `proposer_hash`'s body and every body reachable through its
+/// `tx_refs`/`prop_refs` (mirrors `PrismLedger::build_ledger_delta_for_leader`'s
+/// DFS -- see `PrismChain::prune`'s doc comment). `visited` both prevents
+/// re-walking a proposer reachable via multiple paths (the proposer DAG can
+/// have diamonds) and lets repeated `prune` calls skip already-pruned
+/// subtrees cheaply: `db.get_block` returns `None` for an already-pruned
+/// hash, which this treats as "nothing left to do here," not an error.
+fn prune_proposer_subtree_bodies(db: &PrismDb, proposer_hash: &H256, visited: &mut HashSet<H256>) {
+    if !visited.insert(*proposer_hash) {
+        return;
+    }
+    let Ok(Some(block)) = db.get_block(proposer_hash) else {
+        return;
+    };
+    if let BlockContent::Proposer { tx_refs, prop_refs } = &block.content {
+        for r in tx_refs {
+            let _ = db.delete_block_body(r);
+            let _ = db.set_block_status(r, BlockStatus::Pruned);
+        }
+        for r in prop_refs {
+            prune_proposer_subtree_bodies(db, r, visited);
+        }
+    }
+    let _ = db.delete_block_body(proposer_hash);
+    let _ = db.set_block_status(proposer_hash, BlockStatus::Pruned);
 }
 
 #[cfg(test)]

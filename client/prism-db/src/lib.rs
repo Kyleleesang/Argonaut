@@ -1,8 +1,8 @@
 //! RocksDB backing store for the Prism DAG.
 //!
-//! Column families mirror prism-rust verbatim so naming is stable across
-//! future cross-repo comparisons. Block inserts use `WriteBatch` for crash
-//! consistency — a block is never half-indexed on disk.
+//! Block inserts use `WriteBatch` for crash consistency — a block is never
+//! half-indexed on disk. See `columns` for the B5 pruning decision that
+//! trimmed this crate's column families down to the ones actually used.
 pub mod columns;
 pub mod db;
 

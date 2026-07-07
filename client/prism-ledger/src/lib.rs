@@ -130,24 +130,21 @@ impl PrismLedger {
     /// actually built and imported, so if a node crashes mid-import those
     /// columns can be one level ahead of what was truly committed. The
     /// Substrate best-block number can never be ahead of reality, so it's the
-    /// only race-free anchor. Because `advance` always writes level ℓ's entry
-    /// before that level's block is returned for import, and import must have
-    /// happened for `best_number` to reflect it, every level in `1..=confirmed_tip`
-    /// is guaranteed to have a `PROPOSER_LEADER_SEQUENCE` entry here.
+    /// only race-free anchor.
+    ///
+    /// B5 pruning prerequisite: `emitted_tx_hashes` used to be rebuilt by
+    /// re-running `build_ledger_delta_for_leader` (the DFS-over-tx-bodies
+    /// path `advance` itself uses) for every level `1..=confirmed_tip`,
+    /// purely to repopulate the dedup set from tx bodies read back off disk.
+    /// That breaks the moment tx-block bodies become prunable -- a body
+    /// `advance` already consumed and doesn't need again may be gone by the
+    /// time `recover` runs. `EMITTED_TX_HASH` (populated incrementally by
+    /// `build_ledger_delta_for_leader` itself, at the exact moment each tx is
+    /// first emitted) makes the dedup set durable directly, independent of
+    /// whether the bodies that produced it still exist.
     pub fn recover(db: Arc<PrismDb>, confirmed_tip: u64) -> Self {
-        let mut ledger = PrismLedger { db, confirmed_tip: 0, emitted_tx_hashes: HashSet::new() };
-        for level in 1..=confirmed_tip {
-            if let Ok(Some(leader)) =
-                ledger.db.get_h256(columns::PROPOSER_LEADER_SEQUENCE, &level.to_le_bytes())
-            {
-                // Re-run the same DFS+dedup path `advance` uses, purely to
-                // repopulate `emitted_tx_hashes` -- the returned tx list is
-                // discarded, since those txs were already applied in a prior run.
-                let _ = ledger.build_ledger_delta_for_leader(&leader);
-            }
-        }
-        ledger.confirmed_tip = confirmed_tip;
-        ledger
+        let emitted_tx_hashes = db.iter_emitted_tx_hashes().collect();
+        PrismLedger { db, confirmed_tip, emitted_tx_hashes }
     }
 
     /// The last level whose delta has already been returned by `advance`.
@@ -229,6 +226,12 @@ impl PrismLedger {
                     for tx in txs {
                         let tx_hash = *blake3::hash(&tx).as_bytes();
                         if self.emitted_tx_hashes.insert(tx_hash) {
+                            // Best-effort, same discipline as every other
+                            // durable write in this codebase (e.g.
+                            // `PrismChain::persist`): in-memory state stays
+                            // correct either way, this only affects
+                            // restart-recovery (`recover`, below).
+                            let _ = self.db.put_emitted_tx_hash(&tx_hash);
                             result.push(tx);
                         }
                     }

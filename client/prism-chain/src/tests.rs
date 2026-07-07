@@ -540,3 +540,156 @@ fn has_block_reports_every_known_block_kind_and_not_unknown_ones() {
     assert!(!chain.has_block(&dangling_parent), "the orphan's missing parent itself was never inserted");
     assert!(!chain.has_block(&H256::from([9u8; 32])), "a hash never seen at all");
 }
+
+/// B5 pruning: the load-bearing invariant is that pruning `voter_meta` never
+/// changes vote accounting (`chain.votes`) -- both confirmation stages read
+/// only that incrementally-maintained map, never voter-block history. Also
+/// locks in the accepted, documented side effect: `recount_votes` (a
+/// from-scratch replay of history) *does* start undercounting once its walk
+/// crosses the pruned frontier, since that's exactly the history pruning
+/// deletes -- this is expected, not a regression, per `PrismChain::prune`'s
+/// doc comment.
+#[test]
+fn prune_removes_deep_voter_history_without_changing_vote_totals() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let db = std::sync::Arc::new(PrismDb::open(dir.path()).expect("open PrismDb"));
+    let mut chain = PrismChain::with_db(params(), db);
+    let genesis = genesis_sentinel();
+
+    let prop = proposer_block(1, genesis, vec![], vec![]);
+    let prop_hash = block_hash(&prop.header);
+    chain.insert_block(prop);
+
+    // 30-deep chain 0; only the first block casts a vote, so that vote's
+    // casting block (depth 1) is exactly what a k_prune=10 frontier (tip
+    // depth 30 -> frontier 20) should sweep.
+    let mut nonce = 0u64;
+    let mut tip = genesis;
+    for i in 0..30u64 {
+        let votes = if i == 0 { vec![prop_hash] } else { vec![] };
+        tip = ins(&mut chain, tip, votes, &mut nonce);
+    }
+    let _ = tip;
+
+    let before = chain.vote_totals();
+    assert_eq!(before.get(&prop_hash), Some(&1));
+    assert_eq!(before, chain.recount_votes(), "sanity check before pruning");
+
+    chain.prune(10, 0);
+
+    assert_eq!(chain.vote_totals(), before, "pruning must never change vote accounting");
+    assert_ne!(
+        chain.recount_votes(),
+        before,
+        "recount_votes walks history and must now undercount past the pruned frontier -- \
+         if this starts passing again, either pruning stopped removing anything or \
+         recount_votes started reading something other than voter_meta"
+    );
+}
+
+/// B5 pruning: `has_block` must keep reporting `true` for a pruned hash (via
+/// the `BlockStatus::Pruned` tombstone), and a stale re-delivery of a pruned
+/// voter block's *child* must be rejected outright, not orphaned forever
+/// waiting on a parent that can never arrive.
+#[test]
+fn pruned_blocks_stay_known_and_reject_rather_than_orphan_descendants() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let db = std::sync::Arc::new(PrismDb::open(dir.path()).expect("open PrismDb"));
+    let mut chain = PrismChain::with_db(params(), db);
+    let genesis = genesis_sentinel();
+
+    let mut nonce = 0u64;
+    let mut hashes = Vec::new();
+    let mut tip = genesis;
+    for _ in 0..30u64 {
+        tip = ins(&mut chain, tip, vec![], &mut nonce);
+        hashes.push(tip);
+    }
+
+    chain.prune(10, 0); // frontier = 30 - 10 = 20 -> hashes[0..20) pruned (depths 1..=20)
+
+    let pruned_hash = hashes[5]; // depth 6, well within the pruned range
+    assert!(chain.has_block(&pruned_hash), "a pruned block must still be reported as known");
+
+    // A block whose parent is the pruned hash, re-delivered as if from a
+    // stale peer: must be rejected (no missing refs requested, not stuck in
+    // `orphans`), not orphaned forever.
+    let dangling_child = voter_block(9999, 0, pruned_hash, vec![]);
+    let dangling_hash = block_hash(&dangling_child.header);
+    let outcome = chain.insert_block(dangling_child);
+    assert!(outcome.missing.is_empty(), "a pruned parent must never be requested via fetch");
+    assert!(!chain.orphans.contains_key(&dangling_hash), "must be rejected, not left waiting in orphans");
+}
+
+/// B5 pruning: proposer/tx-block *bodies* referenced only by already-confirmed
+/// history are dropped from `BLOCKS`, but their metadata (level, existence)
+/// stays queryable forever -- confirmation logic never needs body content.
+#[test]
+fn prune_drops_confirmed_bodies_but_keeps_meta_queryable() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let db = std::sync::Arc::new(PrismDb::open(dir.path()).expect("open PrismDb"));
+    let mut chain = PrismChain::with_db(params(), db.clone());
+    let genesis = genesis_sentinel();
+
+    let tx = tx_block(1, genesis);
+    let tx_hash = block_hash(&tx.header);
+    chain.insert_block(tx);
+
+    let prop = proposer_block(2, genesis, vec![tx_hash], vec![]);
+    let prop_hash = block_hash(&prop.header);
+    chain.insert_block(prop);
+
+    assert!(db.get_block(&prop_hash).unwrap().is_some());
+    assert!(db.get_block(&tx_hash).unwrap().is_some());
+
+    chain.prune(1_000_000, 1); // level 1 is confirmed; no voter chain deep enough to prune
+
+    assert!(db.get_block(&prop_hash).unwrap().is_none(), "confirmed proposer body should be dropped");
+    assert!(db.get_block(&tx_hash).unwrap().is_none(), "tx body referenced only by confirmed history should be dropped");
+    assert_eq!(
+        db.get_block_status(&prop_hash).unwrap(),
+        Some(argonaut_prism_db::BlockStatus::Pruned)
+    );
+
+    // Meta survives: level/existence queries still work with the body gone.
+    assert_eq!(chain.proposer_level(&prop_hash), Some(1));
+    assert_eq!(chain.leader_at_level(1), Some(prop_hash));
+    assert_eq!(chain.proposers_at_level(1), vec![prop_hash]);
+    assert!(chain.has_block(&prop_hash));
+    assert!(chain.has_block(&tx_hash));
+}
+
+/// B5 pruning + B-7 restart: after pruning, a restart must still converge --
+/// this is the whole reason `ChainCheckpoint` exists (full replay would
+/// otherwise try to re-derive state from bodies `prune` just deleted).
+#[test]
+fn restart_after_pruning_still_recovers_correctly() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let db = std::sync::Arc::new(PrismDb::open(dir.path()).expect("open PrismDb"));
+    let genesis = genesis_sentinel();
+
+    let mut chain = PrismChain::with_db(params(), db.clone());
+    let prop = proposer_block(1, genesis, vec![], vec![]);
+    let prop_hash = block_hash(&prop.header);
+    chain.insert_block(prop);
+
+    let mut nonce = 0u64;
+    let mut tip = genesis;
+    for i in 0..30u64 {
+        let votes = if i == 0 { vec![prop_hash] } else { vec![] };
+        tip = ins(&mut chain, tip, votes, &mut nonce);
+    }
+    let final_tip = tip;
+
+    chain.prune(10, 1); // prunes deep chain-0 history + prop's now-confirmed body
+    let before_votes = chain.vote_totals();
+    let before_tip_depth = chain.voter_tips[0].1;
+
+    drop(chain);
+    let recovered = PrismChain::with_db(params(), db);
+
+    assert_eq!(recovered.voter_tips[0], (final_tip, before_tip_depth));
+    assert_eq!(recovered.vote_totals(), before_votes);
+    assert_eq!(recovered.proposer_level(&prop_hash), Some(1));
+    assert!(recovered.has_block(&prop_hash), "pruned-but-confirmed proposer must still be known after restart");
+}
