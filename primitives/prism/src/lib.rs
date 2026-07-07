@@ -45,6 +45,15 @@ pub struct Params {
     /// guess retargeting starts correcting from, same as Bitcoin's genesis
     /// difficulty.
     pub target_interval_ms: u64,
+    /// B-5: domain-separates every network's Prism DAG -- fed into
+    /// [`genesis_hash`] to derive each voter chain's and the proposer
+    /// tree's actual genesis hash, so a block mined against network A's
+    /// genesis has no valid ancestry on network B. Set from the Substrate
+    /// chain's own `client.chain_info().genesis_hash` in
+    /// `node/src/service.rs`; tests use a fixed dummy (commonly
+    /// `H256::zero()`, which is fine as a *value* now that it's just an
+    /// input to `genesis_hash` rather than the genesis hash itself).
+    pub chain_spec_genesis: H256,
 }
 
 impl Params {
@@ -57,7 +66,15 @@ impl Params {
         let f_v = difficulty / total_slots;
         let f_t = f_v;
         let f_p = f_v;
-        Params { m_voter_chains: m, difficulty, f_v, f_t, f_p, target_interval_ms: 1_000 }
+        Params {
+            m_voter_chains: m,
+            difficulty,
+            f_v,
+            f_t,
+            f_p,
+            target_interval_ms: 1_000,
+            chain_spec_genesis: H256::zero(),
+        }
     }
 
     /// Recompute `difficulty`/`f_v`/`f_t`/`f_p` for a new *combined* target,
@@ -402,7 +419,11 @@ pub fn validate_block(block: &PrismBlock, params: &Params) -> Result<Validated, 
 }
 
 /// Compute a deterministic genesis block hash for a given chain slot.
-/// Every Prism chain (m voter + 1 tx + 1 proposer) gets a distinct genesis.
+/// B-5: every voter chain (slot `0..m-1`) and the proposer tree (slot `m`)
+/// gets a distinct genesis, domain-separated by `chain_spec_genesis` so a
+/// block mined against one network's genesis has no valid ancestry on
+/// another's. Tx blocks parent onto proposers and need no genesis slot of
+/// their own -- only `m + 1` distinct geneses exist, not `m + 2`.
 pub fn genesis_hash(chain_spec_genesis: &H256, slot: u16) -> H256 {
     let mut buf = [0u8; 34];
     buf[..32].copy_from_slice(chain_spec_genesis.as_bytes());

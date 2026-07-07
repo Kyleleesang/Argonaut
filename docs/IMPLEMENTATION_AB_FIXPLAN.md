@@ -41,6 +41,7 @@ These don't need re-work. Each line is the one thing worth remembering, not a hi
 - [ ] B-4: measure that the devnet confirms levels faster with stage-2 live than stage-1 alone.
 - [ ] B-7/AF-5: live-devnet restart with a non-trivial DAG (unit-tested only so far).
 - [ ] B-6: two-node live backfill (fresh node2 against a non-trivial node1 history; repeat with node2 stopped mid-run and restarted) — unit-tested only so far (`insert_backfill_block`/`backfill`/`has_block` logic), no real `sc-network` run yet since `PrismNetworkWorker` has no test harness (same gap every other wire.rs-level item has).
+- [ ] B-5: two-node fresh-DB mine-and-confirm plus one restart with real per-chain genesis hashes (unit-tested only so far).
 
 ### 1. B-5: per-chain genesis hashes (not to be confused with "B5 pruning" below)
 
@@ -54,6 +55,16 @@ These don't need re-work. Each line is the one thing worth remembering, not a hi
 - **No wire-format changes:** parents are already plain `H256`s; only the *values* change.
 
 **Verify:** adapt fixtures to a nonzero dummy genesis; new tests for foreign-genesis-orphans and wrong-chain-genesis-parent-rejected; B-7's restart-recovery test still passes with per-chain geneses. Then fresh DBs on both nodes, two-node mine-and-confirm, plus one restart.
+
+**Status (2026-07-07): done, code + unit tests, `cargo test --workspace` green.** Implemented per the plan above with no deviations:
+- `primitives/prism::Params` gained `chain_spec_genesis: H256`; `genesis_hash`'s doc comment fixed to the real `m voter (slot 0..m-1) + proposer tree (slot m)` convention, no tx-block slot.
+- `PrismChain` gained `voter_genesis: Vec<H256>`/`proposer_genesis: H256` (computed once in `new()` from `params.chain_spec_genesis`), replacing `genesis_sentinel()` (deleted) everywhere it was used, including inside `ChainCheckpoint`-based restart (recomputed identically from `params` every `with_db` call, not persisted -- deterministic given the same `chain_spec_genesis`).
+- New genesis-boundary check in `insert_block`'s voter arm: a block claiming chain `i` whose parent is *some* chain's genesis but not chain `i`'s own is rejected outright (not orphaned) -- was structurally undetectable before per-chain geneses existed.
+- `PrismDb` gained `CHAIN_SPEC_GENESIS` (single-key CF); `PrismChain::with_db` hard-errors (`assert_eq!`) on a mismatch against a previously-stored value, matching the "purge and remine" migration answer -- no migration path was built.
+- `client/prism-miner`: `build_template`'s proposer-parent fallback and `PrismMiner::new`'s default template both switched from the shared sentinel to `chain.proposer_genesis`/re-derived per-chain genesis hashes (the latter has no `PrismChain` handle, so it re-derives via `genesis_hash` directly from `params.chain_spec_genesis` -- must stay in sync with `PrismChain::new`'s derivation, same slot convention).
+- `node/src/service.rs` sets `chain_spec_genesis` from `client.info().genesis_hash` (the Substrate chain's own genesis, already network-unique and agreed by every node).
+- Test fixtures across `prism-chain`, `prism-ledger` (`tests.rs`, `adversarial_tests.rs`, `honest_split_tests.rs`, `confirmation/tests.rs`), `prism-miner`, and `prism-network` updated from the shared sentinel to `chain.proposer_genesis`/`chain.voter_genesis[i]`, picking the right per-chain value at each call site (several tests use multiple voter chains and needed splitting a single shared `genesis` variable into distinct proposer/per-chain values). Two new tests added to `prism-chain`: `foreign_chain_spec_genesis_produces_unresolvable_orphans` and `wrong_chain_genesis_parent_is_rejected_not_orphaned`, matching this section's own "Verify" line.
+- Not yet done: the live two-node verify pass (fresh DBs, mine-and-confirm, one restart) -- unit-tested only so far, per [[feedback-live-verification-required]] in memory.
 
 ### 2. Backlog — as convenient, no correctness impact
 

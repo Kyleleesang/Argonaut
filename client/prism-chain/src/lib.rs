@@ -70,6 +70,14 @@ struct ProposerMeta {
 /// suitable for any offline scripted-sequence testing).
 pub struct PrismChain {
     pub params: Params,
+    /// B-5: per voter chain `i`'s genesis hash (`genesis_hash(chain_spec_genesis, i)`),
+    /// computed once in `new()`. Not a real mined block -- seeded directly
+    /// into `voter_meta` so parent lookups for the first real block on each
+    /// chain resolve without special-casing, same role `genesis_sentinel()`
+    /// used to serve, but domain-separated per chain and per network.
+    pub voter_genesis: Vec<H256>,
+    /// B-5: the proposer tree's genesis hash (`genesis_hash(chain_spec_genesis, m)`).
+    pub proposer_genesis: H256,
     pub proposer_best_level: u64,
     /// Per voter chain: (tip_hash, tip_depth).
     pub voter_tips: Vec<(H256, u64)>,
@@ -163,32 +171,39 @@ const CHAIN_CHECKPOINT_VERSION: u32 = 1;
 /// `with_db`'s `has_block`-gated replay loop, not a correctness issue.
 const CHECKPOINT_INTERVAL: u64 = 256;
 
-/// Shared genesis sentinel used by every voter chain and the proposer tree.
-/// Not a real mined block; seeded directly into the metadata maps so parent
-/// lookups for the first real block on each chain resolve without special-casing.
-///
-/// Public so callers building mining templates (e.g. `client/prism-miner`) can
-/// use it as the starting parent before any real proposer/voter block exists.
-pub fn genesis_sentinel() -> H256 {
-    H256::zero()
-}
-
 impl PrismChain {
     /// Pure in-memory chain state (no durable storage). Suitable for tests.
     pub fn new(params: Params) -> Self {
         let m = params.m_voter_chains as usize;
-        let genesis = genesis_sentinel();
+        // B-5: distinct, domain-separated genesis per voter chain (slot
+        // `0..m-1`) and the proposer tree (slot `m`) -- replaces the single
+        // shared `H256::zero()` sentinel every chain and every network used
+        // to root at, which gave no network domain separation (a block
+        // mined against network A's genesis was structurally valid
+        // ancestry on network B) and no chain-slot separation at the
+        // genesis boundary.
+        let voter_genesis: Vec<H256> = (0..m as u16)
+            .map(|i| argonaut_primitives_prism::genesis_hash(&params.chain_spec_genesis, i))
+            .collect();
+        let proposer_genesis =
+            argonaut_primitives_prism::genesis_hash(&params.chain_spec_genesis, m as u16);
 
         let mut voter_meta = HashMap::new();
-        voter_meta.insert(genesis, VoterMeta { parent: genesis, depth: 0, votes: Vec::new() });
+        for &g in &voter_genesis {
+            voter_meta.insert(g, VoterMeta { parent: g, depth: 0, votes: Vec::new() });
+        }
 
         let mut proposer_meta = HashMap::new();
-        proposer_meta.insert(genesis, ProposerMeta { level: 0 });
+        proposer_meta.insert(proposer_genesis, ProposerMeta { level: 0 });
+
+        let voter_tips: Vec<(H256, u64)> = voter_genesis.iter().map(|&g| (g, 0)).collect();
 
         PrismChain {
             params,
+            voter_genesis,
+            proposer_genesis,
             proposer_best_level: 0,
-            voter_tips: vec![(genesis, 0); m],
+            voter_tips,
             unreferenced_tx_blocks: HashSet::new(),
             unreferenced_proposers: HashSet::new(),
             known_tx_blocks: HashSet::new(),
@@ -233,7 +248,29 @@ impl PrismChain {
     /// called after every acceptance, recursively) resolves the remainder
     /// to a fixed point regardless of the order it's fed in -- the same
     /// argument as before, just starting from a non-empty base state.
+    ///
+    /// B-5: hard-errors if `db` was already opened once under a different
+    /// `params.chain_spec_genesis` -- every stored block's ancestry is
+    /// derived from that value via per-chain genesis hashes, so a mismatch
+    /// means every parent hash in `db` would silently fail to resolve
+    /// against the new genesis set, producing a DB full of unreachable
+    /// orphans rather than an obvious error. Devnet answer: purge and
+    /// remine (`docs/IMPLEMENTATION_AB_FIXPLAN.md`, "B-5" section) --
+    /// there's no migration path for a genesis change.
     pub fn with_db(mut params: Params, db: Arc<PrismDb>) -> Self {
+        match db.get_h256(columns::CHAIN_SPEC_GENESIS, b"current") {
+            Ok(Some(stored)) => assert_eq!(
+                stored, params.chain_spec_genesis,
+                "PrismDb was created for chain_spec_genesis {stored:?}, but this node is running \
+                 with chain_spec_genesis {:?} -- every stored block's ancestry is unrecoverable \
+                 under a different genesis; purge and remine this PrismDb",
+                params.chain_spec_genesis,
+            ),
+            Ok(None) => {
+                let _ = db.put_h256(columns::CHAIN_SPEC_GENESIS, b"current", &params.chain_spec_genesis);
+            }
+            Err(_) => {}
+        }
         if let Ok(Some(target)) = db.get_u256(columns::CURRENT_DIFFICULTY_TARGET, b"current") {
             params.set_combined_target(target);
         }
@@ -411,6 +448,18 @@ impl PrismChain {
                 if chain_idx >= self.voter_tips.len() {
                     // Structurally invalid (should have been rejected by
                     // `validate_block` already); ignore defensively.
+                    return outcome;
+                }
+                // B-5: per-chain geneses make this enforceable at the
+                // genesis boundary for the first time -- before, every
+                // chain shared one sentinel, so there was no way to tell a
+                // block genuinely starting chain `chain_idx` from one
+                // wrongly (or maliciously) parented onto a *different*
+                // chain's genesis. `voter_parent` matching *some* chain's
+                // genesis but not `chain_idx`'s own is unambiguous: reject,
+                // don't orphan -- it will never resolve into a legitimate
+                // ancestor of this chain.
+                if self.voter_genesis.contains(voter_parent) && *voter_parent != self.voter_genesis[chain_idx] {
                     return outcome;
                 }
                 if !self.voter_meta.contains_key(voter_parent) {
@@ -607,10 +656,10 @@ impl PrismChain {
     }
 
     /// The level of a known proposer block, or `None` if `hash` hasn't been
-    /// inserted (or is the genesis sentinel). Used by `client/prism-miner` to
+    /// inserted (or is the proposer genesis). Used by `client/prism-miner` to
     /// pick the deepest unreferenced proposer as a new proposer/tx block's parent.
     pub fn proposer_level(&self, hash: &H256) -> Option<u64> {
-        if *hash == genesis_sentinel() {
+        if *hash == self.proposer_genesis {
             return None;
         }
         self.proposer_meta.get(hash).map(|m| m.level)

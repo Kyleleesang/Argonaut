@@ -27,7 +27,6 @@
 //! via some later, less-censored proposer. Checked here against
 //! `PrismLedger::advance`'s actual dedup/attribution logic.
 use super::*;
-use argonaut_prism_chain::genesis_sentinel;
 use argonaut_primitives_prism::{block_hash, ChainId, MerkleProof, Params, PrismBlock, SuperHeader};
 use sp_core::U256;
 
@@ -89,8 +88,7 @@ fn attacker_fork(
     first_vote: Vec<H256>,
     nonce: &mut u64,
 ) {
-    let genesis = genesis_sentinel();
-    let mut tip = genesis;
+    let mut tip = chain.voter_genesis[chain_idx as usize];
     for i in 0..length {
         *nonce += 1;
         let votes = if i == 0 { first_vote.clone() } else { vec![] };
@@ -106,7 +104,7 @@ fn balancing_attack_with_zero_confirmation_depth_can_trick_the_ledger() {
     // supposed to prevent trusting -- this test exists to demonstrate why,
     // not to suggest k=0 is a real deployment configuration.
     let (_dir, mut chain, db) = setup(4);
-    let genesis = genesis_sentinel();
+    let genesis = chain.proposer_genesis;
     let mut nonce = 1000u64;
 
     let p1 = proposer_block(1, genesis, vec![], vec![]);
@@ -119,7 +117,7 @@ fn balancing_attack_with_zero_confirmation_depth_can_trick_the_ledger() {
     // Chains 1-3 vote p1, honestly and permanently.
     for c in 1..4u16 {
         nonce += 1;
-        chain.insert_block(voter_block(nonce, c, genesis, vec![p1_hash]));
+        chain.insert_block(voter_block(nonce, c, chain.voter_genesis[c as usize], vec![p1_hash]));
     }
 
     // The attacker's chain 0 momentarily also votes p1 -- unanimous for one instant.
@@ -149,7 +147,7 @@ fn balancing_attack_with_zero_confirmation_depth_can_trick_the_ledger() {
 #[test]
 fn adequate_confirmation_depth_survives_the_same_balancing_attack() {
     let (_dir, mut chain, db) = setup(4);
-    let genesis = genesis_sentinel();
+    let genesis = chain.proposer_genesis;
     let mut nonce = 1000u64;
     const K: u64 = 5;
 
@@ -162,7 +160,7 @@ fn adequate_confirmation_depth_survives_the_same_balancing_attack() {
 
     for c in 1..4u16 {
         nonce += 1;
-        chain.insert_block(voter_block(nonce, c, genesis, vec![p1_hash]));
+        chain.insert_block(voter_block(nonce, c, chain.voter_genesis[c as usize], vec![p1_hash]));
     }
 
     let mut ledger = PrismLedger::new(db);
@@ -225,7 +223,7 @@ fn persistent_balancing_attacker_stalls_stage1_alone_but_not_the_system() {
     // *same* attack sequence -- stage-1 in isolation stays stuck forever;
     // `advance()` (stage-1 *and* stage-2 together) does not.
     let (_dir, mut chain, db) = setup(4);
-    let genesis = genesis_sentinel();
+    let genesis = chain.proposer_genesis;
     let mut nonce = 1000u64;
     const K: u64 = 3;
 
@@ -238,7 +236,7 @@ fn persistent_balancing_attacker_stalls_stage1_alone_but_not_the_system() {
 
     for c in 1..4u16 {
         nonce += 1;
-        chain.insert_block(voter_block(nonce, c, genesis, vec![p1_hash]));
+        chain.insert_block(voter_block(nonce, c, chain.voter_genesis[c as usize], vec![p1_hash]));
         // Give the honest chains plenty of depth -- irrelevant to stage-1
         // (chain 0 alone can block its unanimity regardless of how deep the
         // others are), but exactly what lets stage-2 tell p1's overwhelming,
@@ -254,7 +252,7 @@ fn persistent_balancing_attacker_stalls_stage1_alone_but_not_the_system() {
 
     // Chain 0 briefly agrees with the majority (not yet k-deep)...
     nonce += 1;
-    chain.insert_block(voter_block(nonce, 0, genesis, vec![p1_hash]));
+    chain.insert_block(voter_block(nonce, 0, chain.voter_genesis[0], vec![p1_hash]));
     assert_eq!(ledger.advance(&chain, K), vec![]);
 
     // ...then the attacker reorgs it onto a longer fork voting the minority
@@ -297,7 +295,7 @@ fn persistent_balancing_attacker_stalls_stage1_alone_but_not_the_system() {
 #[test]
 fn censored_transaction_is_still_included_via_a_later_honest_proposer() {
     let (_dir, mut chain, db) = setup(3);
-    let genesis = genesis_sentinel();
+    let genesis = chain.proposer_genesis;
     let mut nonce = 1000u64;
 
     let censored_tx = tx_block(1, genesis, vec![vec![0xCE, 0x50, 0x2E]]);
@@ -311,7 +309,7 @@ fn censored_transaction_is_still_included_via_a_later_honest_proposer() {
     chain.insert_block(p1);
     for c in 0..3u16 {
         nonce += 1;
-        chain.insert_block(voter_block(nonce, c, genesis, vec![p1_hash]));
+        chain.insert_block(voter_block(nonce, c, chain.voter_genesis[c as usize], vec![p1_hash]));
     }
 
     let mut ledger = PrismLedger::new(db);

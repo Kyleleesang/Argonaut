@@ -4,7 +4,6 @@
 //! `PrismChain::confirmed_leader_at_level` (already covered by prism-chain's
 //! own tests).
 use super::*;
-use argonaut_prism_chain::genesis_sentinel;
 use argonaut_primitives_prism::{block_hash, ChainId, MerkleProof, Params, PrismBlock, SuperHeader};
 use sp_core::U256;
 
@@ -71,7 +70,7 @@ fn advance_reports_the_leader_blocks_own_timestamp() {
     // node/src/bridge.rs, which was found live to use SystemTime::now() and
     // so produced different block hashes on different honest nodes.
     let (_dir, mut chain, db) = setup();
-    let genesis = genesis_sentinel();
+    let genesis = chain.proposer_genesis;
     let mut p1 = proposer_block(1, genesis, vec![], vec![]);
     p1.header.timestamp_ms = 424_242;
     let p1_hash = block_hash(&p1.header);
@@ -95,7 +94,7 @@ fn advance_returns_nothing_before_any_level_is_confirmed() {
 #[test]
 fn build_ledger_delta_expands_direct_refs_in_order_and_dedups_within_a_level() {
     let (_dir, mut chain, db) = setup();
-    let genesis = genesis_sentinel();
+    let genesis = chain.proposer_genesis;
 
     // p1 directly references two tx blocks, t1 then t2.
     let t1 = tx_block(1, genesis, vec![vec![10], vec![11]]);
@@ -125,7 +124,7 @@ fn build_ledger_delta_expands_direct_refs_in_order_and_dedups_within_a_level() {
 #[test]
 fn advance_is_idempotent_once_no_new_level_is_confirmable() {
     let (_dir, mut chain, db) = setup();
-    let genesis = genesis_sentinel();
+    let genesis = chain.proposer_genesis;
     let t1 = tx_block(1, genesis, vec![vec![1]]);
     let t1_hash = block_hash(&t1.header);
     chain.insert_block(t1);
@@ -144,7 +143,7 @@ fn advance_is_idempotent_once_no_new_level_is_confirmable() {
 #[test]
 fn build_ledger_delta_follows_indirect_refs_and_dedups_across_levels() {
     let (_dir, mut chain, db) = setup();
-    let genesis = genesis_sentinel();
+    let genesis = chain.proposer_genesis;
 
     let t1 = tx_block(1, genesis, vec![vec![1], vec![2]]);
     let t1_hash = block_hash(&t1.header);
@@ -180,7 +179,7 @@ fn build_ledger_delta_follows_indirect_refs_and_dedups_across_levels() {
 #[test]
 fn advance_persists_leader_sequence_and_ledger_order_to_db() {
     let (_dir, mut chain, db) = setup();
-    let genesis = genesis_sentinel();
+    let genesis = chain.proposer_genesis;
     let p1 = proposer_block(1, genesis, vec![], vec![]);
     let p1_hash = block_hash(&p1.header);
     chain.insert_block(p1);
@@ -202,7 +201,7 @@ fn advance_persists_leader_sequence_and_ledger_order_to_db() {
 #[test]
 fn advance_respects_k_deep_and_confirms_once_votes_are_deep_enough() {
     let (_dir, mut chain, db) = setup();
-    let genesis = genesis_sentinel();
+    let genesis = chain.proposer_genesis;
     let p1 = proposer_block(1, genesis, vec![], vec![]);
     let p1_hash = block_hash(&p1.header);
     chain.insert_block(p1);
@@ -240,16 +239,16 @@ fn confirmed_leader_at_level_none_for_unknown_level() {
 #[test]
 fn confirmed_leader_at_level_requires_every_chain_to_vote() {
     let (_dir, mut chain, _db) = setup();
-    let genesis = genesis_sentinel();
+    let genesis = chain.proposer_genesis;
 
     let p1 = proposer_block(1, genesis, vec![], vec![]);
     let p1_hash = block_hash(&p1.header);
     chain.insert_block(p1);
 
     // Only 3 of the 4 chains (params() uses m=4) vote.
-    chain.insert_block(voter_block(101, 0, genesis, vec![p1_hash]));
-    chain.insert_block(voter_block(102, 1, genesis, vec![p1_hash]));
-    chain.insert_block(voter_block(103, 2, genesis, vec![p1_hash]));
+    chain.insert_block(voter_block(101, 0, chain.voter_genesis[0], vec![p1_hash]));
+    chain.insert_block(voter_block(102, 1, chain.voter_genesis[1], vec![p1_hash]));
+    chain.insert_block(voter_block(103, 2, chain.voter_genesis[2], vec![p1_hash]));
 
     assert_eq!(confirmed_leader_at_level(&chain, 1, 0), None);
 }
@@ -257,7 +256,7 @@ fn confirmed_leader_at_level_requires_every_chain_to_vote() {
 #[test]
 fn confirmed_leader_at_level_becomes_confirmed_once_votes_are_k_deep() {
     let (_dir, mut chain, _db) = setup();
-    let genesis = genesis_sentinel();
+    let genesis = chain.proposer_genesis;
 
     let p1 = proposer_block(1, genesis, vec![], vec![]);
     let p1_hash = block_hash(&p1.header);
@@ -266,7 +265,7 @@ fn confirmed_leader_at_level_becomes_confirmed_once_votes_are_k_deep() {
     let mut nonce = 300u64;
     for c in 0..4u16 {
         nonce += 1;
-        chain.insert_block(voter_block(nonce, c, genesis, vec![p1_hash]));
+        chain.insert_block(voter_block(nonce, c, chain.voter_genesis[c as usize], vec![p1_hash]));
     }
     // Every chain has voted (satisfies k=0), but each vote is only depth 1 on
     // a depth-1 tip -- 0 blocks behind, so not yet 3-deep.
@@ -297,7 +296,7 @@ fn confirmed_leader_at_level_becomes_confirmed_once_votes_are_k_deep() {
 #[test]
 fn recover_does_not_rewind_the_confirmed_cursor() {
     let (_dir, mut chain, db) = setup();
-    let genesis = genesis_sentinel();
+    let genesis = chain.proposer_genesis;
     let p1 = proposer_block(1, genesis, vec![], vec![]);
     let p1_hash = block_hash(&p1.header);
     chain.insert_block(p1);
@@ -322,7 +321,7 @@ fn recover_does_not_rewind_the_confirmed_cursor() {
 #[test]
 fn recover_carries_over_cross_level_tx_dedup_state() {
     let (_dir, mut chain, db) = setup();
-    let genesis = genesis_sentinel();
+    let genesis = chain.proposer_genesis;
 
     let t1 = tx_block(1, genesis, vec![vec![1]]);
     let t1_hash = block_hash(&t1.header);

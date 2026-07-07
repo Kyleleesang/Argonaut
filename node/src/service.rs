@@ -12,6 +12,7 @@ use sc_client_api::Backend;
 use sc_consensus::import_queue::{BasicQueue, BoxBlockImport};
 use sc_service::{error::Error as ServiceError, Configuration, TaskManager};
 use sc_telemetry::{Telemetry, TelemetryWorker};
+use sp_blockchain::HeaderBackend;
 use sc_transaction_pool_api::{InPoolTransaction, OffchainTransactionPoolFactory, TransactionPool};
 use std::{
     sync::{Arc, Mutex},
@@ -177,9 +178,16 @@ pub fn new_full<N: sc_network::NetworkBackend<Block, <Block as sp_runtime::trait
     // per second on one CPU, enough to trip peer reputation/rate-limiting),
     // so the first `RETARGET_WINDOW` blocks -- before retargeting has fired
     // even once -- don't reproduce that flood while waiting to converge.
+    // B-5: domain-separates this network's Prism DAG from every other's --
+    // every stored block's ancestry ultimately derives from this value via
+    // `genesis_hash`. The Substrate chain's own genesis hash is a natural
+    // per-network-unique anchor already agreed on by every node (it's
+    // baked into the chain spec), so no separate Prism-specific genesis
+    // config is needed.
     let prism_params = {
         let mut p = PrismParams::testnet();
         p.set_combined_target(p.difficulty >> 7);
+        p.chain_spec_genesis = client.info().genesis_hash;
         p
     };
     let prism_db = Arc::new(

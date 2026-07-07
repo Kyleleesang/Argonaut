@@ -38,7 +38,6 @@
 //! don't be surprised if a *perfectly* symmetric 2-miner setup at tiny `m`
 //! never confirms at all, by design of the confirmation math, not a bug in it.
 use super::*;
-use argonaut_prism_chain::genesis_sentinel;
 use argonaut_primitives_prism::{block_hash, ChainId, MerkleProof, Params, PrismBlock, SuperHeader};
 use sp_core::U256;
 
@@ -85,8 +84,8 @@ fn setup(m: u16) -> (tempfile::TempDir, PrismChain, Arc<PrismDb>) {
 /// the same simulated rate, modeling two honest miner populations that never
 /// reorg away from their first-seen proposer.
 fn honest_group_votes_once(chain: &mut PrismChain, chain_idxs: &[ChainId], proposer: H256, nonce: &mut u64) {
-    let genesis = genesis_sentinel();
     for &c in chain_idxs {
+        let genesis = chain.voter_genesis[c as usize];
         *nonce += 1;
         chain.insert_block(voter_block(*nonce, c, genesis, vec![proposer]));
     }
@@ -106,7 +105,7 @@ fn extend_group(chain: &mut PrismChain, chain_idxs: &[ChainId], nonce: &mut u64)
 #[test]
 fn exact_even_split_between_two_honest_proposers_never_confirms() {
     let (_dir, mut chain, db) = setup(4);
-    let genesis = genesis_sentinel();
+    let genesis = chain.proposer_genesis;
     let mut nonce = 1000u64;
 
     // Two honest miners each mine the level-1 proposer first, independently.
@@ -150,7 +149,7 @@ fn any_real_skew_in_an_honest_split_still_resolves_via_stage_2() {
     // the tie test: any genuine asymmetry, however small, is enough for
     // stage-2 to eventually confirm.
     let (_dir, mut chain, db) = setup(4);
-    let genesis = genesis_sentinel();
+    let genesis = chain.proposer_genesis;
     let mut nonce = 1000u64;
 
     let p1 = proposer_block(1, genesis);

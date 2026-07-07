@@ -7,7 +7,6 @@
 //! confidence bounds -> Definition 4.5's gate) works, matching this session's
 //! practice throughout B0-B4 of exercising real state machines over mocks.
 use super::*;
-use argonaut_prism_chain::genesis_sentinel;
 use argonaut_primitives_prism::{
     block_hash, BlockContent, ChainId, MerkleProof, Params, PrismBlock, SuperHeader,
 };
@@ -149,7 +148,7 @@ mod lower_bound_from_depths_tests {
 /// (depth-from-tip 0) -- every chain has voted, so `U_l(r) = 0` throughout.
 fn build_contested_level() -> (PrismChain, H256, H256) {
     let mut chain = PrismChain::new(params(6));
-    let genesis = genesis_sentinel();
+    let genesis = chain.proposer_genesis;
     let mut nonce = 1000u64;
 
     let p1 = proposer_block(1, genesis);
@@ -161,12 +160,12 @@ fn build_contested_level() -> (PrismChain, H256, H256) {
 
     for c in 0..5u16 {
         nonce += 1;
-        let vote_block = voter_block(nonce, c, genesis, vec![p1_hash]);
+        let vote_block = voter_block(nonce, c, chain.voter_genesis[c as usize], vec![p1_hash]);
         chain.insert_block(vote_block);
         extend(&mut chain, c, 9, &mut nonce);
     }
     nonce += 1;
-    chain.insert_block(voter_block(nonce, 5, genesis, vec![p2_hash]));
+    chain.insert_block(voter_block(nonce, 5, chain.voter_genesis[5], vec![p2_hash]));
 
     (chain, p1_hash, p2_hash)
 }
@@ -205,7 +204,7 @@ fn single_proposer_with_full_deep_votes_is_confirmed_alone() {
     // U_l(r) = 1 > 0, clearing the boundary the way a genuinely-in-progress
     // level would.
     let mut chain = PrismChain::new(params(5));
-    let genesis = genesis_sentinel();
+    let genesis = chain.proposer_genesis;
     let mut nonce = 1000u64;
     let p1 = proposer_block(1, genesis);
     let p1_hash = block_hash(&p1.header);
@@ -213,7 +212,7 @@ fn single_proposer_with_full_deep_votes_is_confirmed_alone() {
 
     for c in 0..4u16 {
         nonce += 1;
-        chain.insert_block(voter_block(nonce, c, genesis, vec![p1_hash]));
+        chain.insert_block(voter_block(nonce, c, chain.voter_genesis[c as usize], vec![p1_hash]));
         extend(&mut chain, c, 9, &mut nonce);
     }
 
@@ -236,7 +235,7 @@ fn evenly_matched_contenders_confirm_as_a_list_but_not_a_unique_leader() {
     // (2L+L > m) with L = r-1, r needs to exceed m/3 + 1 -- hence 4 votes
     // each out of m=8 (r=4 > 8/3+1), rather than 3-of-6 (3 is not > 6/3+1).
     let mut chain = PrismChain::new(params(8));
-    let genesis = genesis_sentinel();
+    let genesis = chain.proposer_genesis;
     let mut nonce = 1000u64;
     let p1 = proposer_block(1, genesis);
     let p1_hash = block_hash(&p1.header);
@@ -247,12 +246,12 @@ fn evenly_matched_contenders_confirm_as_a_list_but_not_a_unique_leader() {
 
     for c in 0..4u16 {
         nonce += 1;
-        chain.insert_block(voter_block(nonce, c, genesis, vec![p1_hash]));
+        chain.insert_block(voter_block(nonce, c, chain.voter_genesis[c as usize], vec![p1_hash]));
         extend(&mut chain, c, 9, &mut nonce);
     }
     for c in 4..8u16 {
         nonce += 1;
-        chain.insert_block(voter_block(nonce, c, genesis, vec![p2_hash]));
+        chain.insert_block(voter_block(nonce, c, chain.voter_genesis[c as usize], vec![p2_hash]));
         extend(&mut chain, c, 9, &mut nonce);
     }
 

@@ -36,6 +36,13 @@ pub const EMITTED_TX_HASH: &str = "EMITTED_TX_HASH";
 /// O(live window) instead of O(total historical blocks), and is what makes
 /// restart possible at all once old blocks are pruned out of `BLOCKS`.
 pub const CHAIN_CHECKPOINT: &str = "CHAIN_CHECKPOINT";
+/// B-5: single-key CF holding the `chain_spec_genesis` this `PrismDb` was
+/// first opened with. `PrismChain::with_db` hard-errors on a mismatch --
+/// per-chain genesis hashes derive every stored block's ancestry from this
+/// value, so a DB created under one `chain_spec_genesis` is structurally
+/// incompatible with another (every stored parent hash would silently fail
+/// to resolve). Devnet migration answer: purge and remine, not migrate.
+pub const CHAIN_SPEC_GENESIS: &str = "CHAIN_SPEC_GENESIS";
 
 pub const ALL_COLUMNS: &[&str] = &[
     PROPOSER_LEADER_SEQUENCE,
@@ -45,4 +52,5 @@ pub const ALL_COLUMNS: &[&str] = &[
     CURRENT_DIFFICULTY_TARGET,
     EMITTED_TX_HASH,
     CHAIN_CHECKPOINT,
+    CHAIN_SPEC_GENESIS,
 ];

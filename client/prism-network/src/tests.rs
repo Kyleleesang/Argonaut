@@ -19,7 +19,15 @@ fn fast_params(m: u16) -> Params {
     let difficulty = U256::max_value();
     let total_slots = U256::from(m + 2);
     let f = difficulty / total_slots;
-    Params { m_voter_chains: m, difficulty, f_v: f, f_t: f, f_p: f, target_interval_ms: 1_000 }
+    Params {
+        m_voter_chains: m,
+        difficulty,
+        f_v: f,
+        f_t: f,
+        f_p: f,
+        target_interval_ms: 1_000,
+        chain_spec_genesis: H256::zero(),
+    }
 }
 
 fn mine_one(chain: &PrismChain, params: &Params, queue: u64) -> PrismBlock {

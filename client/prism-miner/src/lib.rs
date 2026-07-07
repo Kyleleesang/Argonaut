@@ -15,7 +15,7 @@ use argonaut_primitives_prism::{
     block_hash, merkle_proof, merkle_root, sortition, BlockContent, Params, PrismBlock, Sortition,
     SuperHeader, H256, MAX_TX_BLOCK_BYTES,
 };
-use argonaut_prism_chain::{genesis_sentinel, PrismChain};
+use argonaut_prism_chain::PrismChain;
 use arc_swap::ArcSwap;
 use parity_scale_codec::Encode;
 use std::sync::Arc;
@@ -91,7 +91,7 @@ pub fn build_template(
         .iter()
         .copied()
         .max_by_key(|h| (chain.proposer_level(h).unwrap_or(0), *h))
-        .unwrap_or_else(genesis_sentinel);
+        .unwrap_or(chain.proposer_genesis);
 
     let mut parents = Vec::with_capacity(m + 2);
     let mut contents = Vec::with_capacity(m + 2);
@@ -201,13 +201,31 @@ pub struct PrismMiner {
 impl PrismMiner {
     pub fn new(params: Params) -> Self {
         let m = params.m_voter_chains as usize;
-        let genesis = genesis_sentinel();
+        // B-5: this constructor has no `PrismChain` handle to read
+        // `voter_genesis`/`proposer_genesis` off of (see `build_template`'s
+        // doc comment), so it re-derives the same per-chain genesis hashes
+        // directly from `params.chain_spec_genesis` -- must stay in sync
+        // with `PrismChain::new`'s derivation (both call
+        // `argonaut_primitives_prism::genesis_hash` with the same slot
+        // convention: voter chain `i` -> slot `i`, proposer tree -> slot `m`).
+        let voter_genesis: Vec<H256> = (0..m as u16)
+            .map(|i| argonaut_primitives_prism::genesis_hash(&params.chain_spec_genesis, i))
+            .collect();
+        let proposer_genesis =
+            argonaut_primitives_prism::genesis_hash(&params.chain_spec_genesis, m as u16);
+        let mut parents = voter_genesis.clone();
+        parents.push(proposer_genesis); // tx slot parents onto the proposer genesis
+        parents.push(proposer_genesis); // proposer slot's own parent
         let default_tmpl = MinerTemplate {
-            parents: vec![genesis; m + 2],
+            parents,
             contents: (0..m + 2)
                 .map(|i| {
                     if i < m {
-                        BlockContent::Voter { chain: i as u16, voter_parent: genesis, votes: vec![] }
+                        BlockContent::Voter {
+                            chain: i as u16,
+                            voter_parent: voter_genesis[i],
+                            votes: vec![],
+                        }
                     } else if i == m {
                         BlockContent::Transaction { txs: vec![] }
                     } else {

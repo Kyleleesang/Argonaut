@@ -74,7 +74,7 @@ fn ins(chain: &mut PrismChain, parent: H256, votes: Vec<H256>, nonce: &mut u64) 
 #[test]
 fn proposer_levels_advance_and_mark_unvoted() {
     let mut chain = PrismChain::new(params());
-    let genesis = genesis_sentinel();
+    let genesis = chain.proposer_genesis;
     let p1 = proposer_block(1, genesis, vec![], vec![]);
     let p1_hash = block_hash(&p1.header);
     let outcome = chain.insert_block(p1);
@@ -90,7 +90,7 @@ fn proposer_levels_advance_and_mark_unvoted() {
 #[test]
 fn sibling_proposers_at_same_level_do_not_reset_unvoted_marker() {
     let mut chain = PrismChain::new(params());
-    let genesis = genesis_sentinel();
+    let genesis = chain.proposer_genesis;
     let p1 = proposer_block(1, genesis, vec![], vec![]);
     let p1_hash = block_hash(&p1.header);
     chain.insert_block(p1);
@@ -107,7 +107,7 @@ fn sibling_proposers_at_same_level_do_not_reset_unvoted_marker() {
 #[test]
 fn proposers_at_level_includes_siblings_never_added_to_unvoted_levels() {
     let mut chain = PrismChain::new(params());
-    let genesis = genesis_sentinel();
+    let genesis = chain.proposer_genesis;
     let p1 = proposer_block(1, genesis, vec![], vec![]);
     let p1_hash = block_hash(&p1.header);
     chain.insert_block(p1);
@@ -127,7 +127,7 @@ fn proposers_at_level_includes_siblings_never_added_to_unvoted_levels() {
 #[test]
 fn tx_block_referenced_by_proposer_becomes_referenced() {
     let mut chain = PrismChain::new(params());
-    let genesis = genesis_sentinel();
+    let genesis = chain.proposer_genesis;
     let tx = tx_block(1, genesis);
     let tx_hash = block_hash(&tx.header);
     chain.insert_block(tx);
@@ -141,7 +141,7 @@ fn tx_block_referenced_by_proposer_becomes_referenced() {
 #[test]
 fn proposer_orphan_resolves_when_parent_arrives() {
     let mut chain = PrismChain::new(params());
-    let genesis = genesis_sentinel();
+    let genesis = chain.proposer_genesis;
     let p1 = proposer_block(1, genesis, vec![], vec![]);
     let p1_hash = block_hash(&p1.header);
     let p2 = proposer_block(2, p1_hash, vec![], vec![]);
@@ -162,7 +162,7 @@ fn proposer_orphan_resolves_when_parent_arrives() {
 #[test]
 fn voter_orphan_resolves_when_parent_arrives() {
     let mut chain = PrismChain::new(params());
-    let genesis = genesis_sentinel();
+    let genesis = chain.voter_genesis[0];
     let v1 = voter_block(1, 0, genesis, vec![]);
     let v1_hash = block_hash(&v1.header);
     let v2 = voter_block(2, 0, v1_hash, vec![]);
@@ -180,9 +180,10 @@ fn voter_orphan_resolves_when_parent_arrives() {
 #[test]
 fn voter_chain_linear_growth_matches_recount() {
     let mut chain = PrismChain::new(params());
-    let genesis = genesis_sentinel();
+    let proposer_genesis = chain.proposer_genesis;
+    let voter_genesis0 = chain.voter_genesis[0];
 
-    let p1 = proposer_block(1, genesis, vec![], vec![]);
+    let p1 = proposer_block(1, proposer_genesis, vec![], vec![]);
     let p1_hash = block_hash(&p1.header);
     chain.insert_block(p1);
     let p2 = proposer_block(2, p1_hash, vec![], vec![]);
@@ -190,7 +191,7 @@ fn voter_chain_linear_growth_matches_recount() {
     chain.insert_block(p2);
 
     let mut nonce = 0;
-    let v1 = ins(&mut chain, genesis, vec![p1_hash], &mut nonce);
+    let v1 = ins(&mut chain, voter_genesis0, vec![p1_hash], &mut nonce);
     ins(&mut chain, v1, vec![p2_hash], &mut nonce);
 
     assert_eq!(chain.votes.get(&p1_hash).map(|v| v.total()), Some(1));
@@ -204,9 +205,10 @@ fn voter_chain_linear_growth_matches_recount() {
 #[test]
 fn voter_chain_reorg_rolls_back_and_reapplies_votes() {
     let mut chain = PrismChain::new(params());
-    let genesis = genesis_sentinel();
+    let proposer_genesis = chain.proposer_genesis;
+    let voter_genesis0 = chain.voter_genesis[0];
 
-    let mut prop_hash = genesis;
+    let mut prop_hash = proposer_genesis;
     let mut proposers = Vec::new();
     for i in 0..4u64 {
         let p = proposer_block(100 + i, prop_hash, vec![], vec![]);
@@ -218,7 +220,7 @@ fn voter_chain_reorg_rolls_back_and_reapplies_votes() {
 
     // Old fork: genesis -> a1 (votes p1) -> a2 (votes p2). Depth 2.
     let mut nonce = 0;
-    let a1 = ins(&mut chain, genesis, vec![p1_hash], &mut nonce);
+    let a1 = ins(&mut chain, voter_genesis0, vec![p1_hash], &mut nonce);
     let a2 = ins(&mut chain, a1, vec![p2_hash], &mut nonce);
 
     assert_eq!(chain.voter_tips[0].0, a2);
@@ -226,7 +228,7 @@ fn voter_chain_reorg_rolls_back_and_reapplies_votes() {
     assert_eq!(chain.votes.get(&p2_hash).map(|v| v.total()), Some(1));
 
     // Competing fork from genesis, longer: b1 (votes p3) -> b2 (votes p4) -> b3 (no votes).
-    let b1 = ins(&mut chain, genesis, vec![p3_hash], &mut nonce);
+    let b1 = ins(&mut chain, voter_genesis0, vec![p3_hash], &mut nonce);
     let b2 = ins(&mut chain, b1, vec![p4_hash], &mut nonce);
     let b3 = ins(&mut chain, b2, vec![], &mut nonce);
 
@@ -252,22 +254,24 @@ fn voter_chain_reorg_rolls_back_and_reapplies_votes() {
 #[test]
 fn reorg_on_one_chain_does_not_affect_another() {
     let mut chain = PrismChain::new(params());
-    let genesis = genesis_sentinel();
-    let p1 = proposer_block(1, genesis, vec![], vec![]);
+    let proposer_genesis = chain.proposer_genesis;
+    let voter_genesis0 = chain.voter_genesis[0];
+    let voter_genesis1 = chain.voter_genesis[1];
+    let p1 = proposer_block(1, proposer_genesis, vec![], vec![]);
     let p1_hash = block_hash(&p1.header);
     chain.insert_block(p1);
 
     // Chain 1 votes for p1 and must stay untouched by chain 0's reorg below.
-    let v_chain1 = voter_block(50, 1, genesis, vec![p1_hash]);
+    let v_chain1 = voter_block(50, 1, voter_genesis1, vec![p1_hash]);
     chain.insert_block(v_chain1);
     assert_eq!(chain.votes.get(&p1_hash).map(|v| v.total()), Some(1));
 
     let mut nonce = 0;
-    ins(&mut chain, genesis, vec![p1_hash], &mut nonce);
+    ins(&mut chain, voter_genesis0, vec![p1_hash], &mut nonce);
     assert_eq!(chain.votes.get(&p1_hash).map(|v| v.total()), Some(2));
 
     // A longer competing fork on chain 0 that casts no votes at all.
-    let c1 = ins(&mut chain, genesis, vec![], &mut nonce);
+    let c1 = ins(&mut chain, voter_genesis0, vec![], &mut nonce);
     ins(&mut chain, c1, vec![], &mut nonce);
 
     // Chain 0's vote for p1 is rolled back; chain 1's vote remains.
@@ -281,9 +285,10 @@ fn reorg_on_one_chain_does_not_affect_another() {
 #[test]
 fn vote_totals_match_recount_after_every_insertion_in_a_long_scripted_sequence() {
     let mut chain = PrismChain::new(params());
-    let genesis = genesis_sentinel();
+    let proposer_genesis = chain.proposer_genesis;
+    let voter_genesis0 = chain.voter_genesis[0];
 
-    let mut prop_hash = genesis;
+    let mut prop_hash = proposer_genesis;
     let mut proposers = Vec::new();
     for i in 0..6u64 {
         let p = proposer_block(100 + i, prop_hash, vec![], vec![]);
@@ -293,12 +298,12 @@ fn vote_totals_match_recount_after_every_insertion_in_a_long_scripted_sequence()
     }
 
     let mut nonce = 0u64;
-    let a1 = ins(&mut chain, genesis, vec![proposers[0]], &mut nonce);
+    let a1 = ins(&mut chain, voter_genesis0, vec![proposers[0]], &mut nonce);
     ins(&mut chain, a1, vec![proposers[1]], &mut nonce);
 
     // Competing fork from genesis, initially shorter (depth 1) -- must NOT
     // replace the tip or change vote totals yet.
-    let b1 = ins(&mut chain, genesis, vec![proposers[2]], &mut nonce);
+    let b1 = ins(&mut chain, voter_genesis0, vec![proposers[2]], &mut nonce);
     assert_eq!(chain.voter_tips[0].1, 2, "shorter fork must not replace the tip");
 
     // Extend b to depth 3 -- now longer than a, must reorg.
@@ -314,7 +319,7 @@ fn vote_totals_match_recount_after_every_insertion_in_a_long_scripted_sequence()
     // Extend further, then a fresh, longer-still fork from genesis again.
     let b4 = ins(&mut chain, b3, vec![proposers[5]], &mut nonce);
     let _ = b4;
-    let c1 = ins(&mut chain, genesis, vec![], &mut nonce);
+    let c1 = ins(&mut chain, voter_genesis0, vec![], &mut nonce);
     let c2 = ins(&mut chain, c1, vec![], &mut nonce);
     let c3 = ins(&mut chain, c2, vec![], &mut nonce);
     let c4 = ins(&mut chain, c3, vec![], &mut nonce);
@@ -337,19 +342,22 @@ fn leader_at_level_returns_none_before_any_proposer_exists() {
 #[test]
 fn leader_at_level_picks_the_proposer_with_more_votes() {
     let mut chain = PrismChain::new(params());
-    let genesis = genesis_sentinel();
+    let proposer_genesis = chain.proposer_genesis;
+    let voter_genesis0 = chain.voter_genesis[0];
+    let voter_genesis1 = chain.voter_genesis[1];
+    let voter_genesis2 = chain.voter_genesis[2];
 
-    let p1 = proposer_block(1, genesis, vec![], vec![]);
+    let p1 = proposer_block(1, proposer_genesis, vec![], vec![]);
     let p1_hash = block_hash(&p1.header);
     chain.insert_block(p1);
-    let p1b = proposer_block(2, genesis, vec![], vec![]);
+    let p1b = proposer_block(2, proposer_genesis, vec![], vec![]);
     let p1b_hash = block_hash(&p1b.header);
     chain.insert_block(p1b);
 
     // p1_hash gets votes from chains 0 and 1; p1b_hash gets one vote from chain 2.
-    chain.insert_block(voter_block(101, 0, genesis, vec![p1_hash]));
-    chain.insert_block(voter_block(102, 1, genesis, vec![p1_hash]));
-    chain.insert_block(voter_block(103, 2, genesis, vec![p1b_hash]));
+    chain.insert_block(voter_block(101, 0, voter_genesis0, vec![p1_hash]));
+    chain.insert_block(voter_block(102, 1, voter_genesis1, vec![p1_hash]));
+    chain.insert_block(voter_block(103, 2, voter_genesis2, vec![p1b_hash]));
 
     assert_eq!(chain.leader_at_level(1), Some(p1_hash));
 }
@@ -357,7 +365,7 @@ fn leader_at_level_picks_the_proposer_with_more_votes() {
 #[test]
 fn leader_at_level_tie_breaks_deterministically_by_hash() {
     let mut chain = PrismChain::new(params());
-    let genesis = genesis_sentinel();
+    let genesis = chain.proposer_genesis;
 
     let p1 = proposer_block(1, genesis, vec![], vec![]);
     let p1_hash = block_hash(&p1.header);
@@ -391,7 +399,7 @@ fn leader_at_level_tie_breaks_deterministically_by_hash() {
 #[test]
 fn insert_block_feeds_the_difficulty_retarget_with_real_timestamps() {
     let mut chain = PrismChain::new(params());
-    let genesis = genesis_sentinel();
+    let genesis = chain.proposer_genesis;
     let initial_difficulty = chain.params.difficulty;
 
     let advancing_header = |nonce: u64, timestamp_ms: u64| SuperHeader {
@@ -441,16 +449,17 @@ fn insert_block_feeds_the_difficulty_retarget_with_real_timestamps() {
 fn with_db_recovers_full_dag_state_after_a_restart() {
     let dir = tempfile::tempdir().expect("create tempdir");
     let db = std::sync::Arc::new(PrismDb::open(dir.path()).expect("open PrismDb"));
-    let genesis = genesis_sentinel();
 
     let mut chain = PrismChain::with_db(params(), db.clone());
+    let proposer_genesis = chain.proposer_genesis;
+    let voter_genesis0 = chain.voter_genesis[0];
 
     // Proposer chain, with a tx block referenced by the second proposer.
-    let p1 = proposer_block(1, genesis, vec![], vec![]);
+    let p1 = proposer_block(1, proposer_genesis, vec![], vec![]);
     let p1_hash = block_hash(&p1.header);
     chain.insert_block(p1);
 
-    let tx = tx_block(2, genesis);
+    let tx = tx_block(2, proposer_genesis);
     let tx_hash = block_hash(&tx.header);
     chain.insert_block(tx);
 
@@ -465,7 +474,7 @@ fn with_db_recovers_full_dag_state_after_a_restart() {
     let p3 = proposer_block(4, p2_hash, vec![], vec![p2_hash]);
     let p3_hash = block_hash(&p3.header);
     chain.insert_block(p3);
-    let unreferenced_tx = tx_block(5, genesis);
+    let unreferenced_tx = tx_block(5, proposer_genesis);
     let unreferenced_tx_hash = block_hash(&unreferenced_tx.header);
     chain.insert_block(unreferenced_tx);
 
@@ -473,9 +482,9 @@ fn with_db_recovers_full_dag_state_after_a_restart() {
     // so restart recovery is checked against non-trivial vote accounting, not
     // just a freshly-accepted, never-superseded vote.
     let mut nonce = 0u64;
-    let a1 = ins(&mut chain, genesis, vec![p1_hash], &mut nonce);
+    let a1 = ins(&mut chain, voter_genesis0, vec![p1_hash], &mut nonce);
     ins(&mut chain, a1, vec![p2_hash], &mut nonce);
-    let b1 = ins(&mut chain, genesis, vec![p1_hash], &mut nonce);
+    let b1 = ins(&mut chain, voter_genesis0, vec![p1_hash], &mut nonce);
     let b2 = ins(&mut chain, b1, vec![], &mut nonce);
     ins(&mut chain, b2, vec![], &mut nonce);
 
@@ -513,18 +522,19 @@ fn with_db_recovers_full_dag_state_after_a_restart() {
 #[test]
 fn has_block_reports_every_known_block_kind_and_not_unknown_ones() {
     let mut chain = PrismChain::new(params());
-    let genesis = genesis_sentinel();
+    let proposer_genesis = chain.proposer_genesis;
+    let voter_genesis0 = chain.voter_genesis[0];
     let mut nonce = 0u64;
 
-    let tx = tx_block(1, genesis);
+    let tx = tx_block(1, proposer_genesis);
     let tx_hash = block_hash(&tx.header);
     chain.insert_block(tx.clone());
 
-    let prop = proposer_block(2, genesis, vec![tx_hash], vec![]);
+    let prop = proposer_block(2, proposer_genesis, vec![tx_hash], vec![]);
     let prop_hash = block_hash(&prop.header);
     chain.insert_block(prop.clone());
 
-    let voter_hash = ins(&mut chain, genesis, vec![prop_hash], &mut nonce);
+    let voter_hash = ins(&mut chain, voter_genesis0, vec![prop_hash], &mut nonce);
 
     // An orphan: a proposer block whose parent is never accepted.
     let dangling_parent = H256::from([7u8; 32]);
@@ -532,7 +542,8 @@ fn has_block_reports_every_known_block_kind_and_not_unknown_ones() {
     let orphan_hash = block_hash(&orphan.header);
     chain.insert_block(orphan);
 
-    assert!(chain.has_block(&genesis));
+    assert!(chain.has_block(&proposer_genesis));
+    assert!(chain.has_block(&voter_genesis0));
     assert!(chain.has_block(&tx_hash));
     assert!(chain.has_block(&prop_hash));
     assert!(chain.has_block(&voter_hash));
@@ -554,9 +565,10 @@ fn prune_removes_deep_voter_history_without_changing_vote_totals() {
     let dir = tempfile::tempdir().expect("create tempdir");
     let db = std::sync::Arc::new(PrismDb::open(dir.path()).expect("open PrismDb"));
     let mut chain = PrismChain::with_db(params(), db);
-    let genesis = genesis_sentinel();
+    let proposer_genesis = chain.proposer_genesis;
+    let voter_genesis0 = chain.voter_genesis[0];
 
-    let prop = proposer_block(1, genesis, vec![], vec![]);
+    let prop = proposer_block(1, proposer_genesis, vec![], vec![]);
     let prop_hash = block_hash(&prop.header);
     chain.insert_block(prop);
 
@@ -564,7 +576,7 @@ fn prune_removes_deep_voter_history_without_changing_vote_totals() {
     // casting block (depth 1) is exactly what a k_prune=10 frontier (tip
     // depth 30 -> frontier 20) should sweep.
     let mut nonce = 0u64;
-    let mut tip = genesis;
+    let mut tip = voter_genesis0;
     for i in 0..30u64 {
         let votes = if i == 0 { vec![prop_hash] } else { vec![] };
         tip = ins(&mut chain, tip, votes, &mut nonce);
@@ -596,11 +608,11 @@ fn pruned_blocks_stay_known_and_reject_rather_than_orphan_descendants() {
     let dir = tempfile::tempdir().expect("create tempdir");
     let db = std::sync::Arc::new(PrismDb::open(dir.path()).expect("open PrismDb"));
     let mut chain = PrismChain::with_db(params(), db);
-    let genesis = genesis_sentinel();
+    let voter_genesis0 = chain.voter_genesis[0];
 
     let mut nonce = 0u64;
     let mut hashes = Vec::new();
-    let mut tip = genesis;
+    let mut tip = voter_genesis0;
     for _ in 0..30u64 {
         tip = ins(&mut chain, tip, vec![], &mut nonce);
         hashes.push(tip);
@@ -629,7 +641,7 @@ fn prune_drops_confirmed_bodies_but_keeps_meta_queryable() {
     let dir = tempfile::tempdir().expect("create tempdir");
     let db = std::sync::Arc::new(PrismDb::open(dir.path()).expect("open PrismDb"));
     let mut chain = PrismChain::with_db(params(), db.clone());
-    let genesis = genesis_sentinel();
+    let genesis = chain.proposer_genesis;
 
     let tx = tx_block(1, genesis);
     let tx_hash = block_hash(&tx.header);
@@ -666,15 +678,16 @@ fn prune_drops_confirmed_bodies_but_keeps_meta_queryable() {
 fn restart_after_pruning_still_recovers_correctly() {
     let dir = tempfile::tempdir().expect("create tempdir");
     let db = std::sync::Arc::new(PrismDb::open(dir.path()).expect("open PrismDb"));
-    let genesis = genesis_sentinel();
 
     let mut chain = PrismChain::with_db(params(), db.clone());
-    let prop = proposer_block(1, genesis, vec![], vec![]);
+    let proposer_genesis = chain.proposer_genesis;
+    let voter_genesis0 = chain.voter_genesis[0];
+    let prop = proposer_block(1, proposer_genesis, vec![], vec![]);
     let prop_hash = block_hash(&prop.header);
     chain.insert_block(prop);
 
     let mut nonce = 0u64;
-    let mut tip = genesis;
+    let mut tip = voter_genesis0;
     for i in 0..30u64 {
         let votes = if i == 0 { vec![prop_hash] } else { vec![] };
         tip = ins(&mut chain, tip, votes, &mut nonce);
@@ -692,4 +705,50 @@ fn restart_after_pruning_still_recovers_correctly() {
     assert_eq!(recovered.vote_totals(), before_votes);
     assert_eq!(recovered.proposer_level(&prop_hash), Some(1));
     assert!(recovered.has_block(&prop_hash), "pruned-but-confirmed proposer must still be known after restart");
+}
+
+/// B-5: per-chain genesis hashes make foreign-network and wrong-chain
+/// blocks structurally rejected, not merely conventionally invalid.
+#[test]
+fn foreign_chain_spec_genesis_produces_unresolvable_orphans() {
+    let mut params_a = params();
+    params_a.chain_spec_genesis = H256::from([1u8; 32]);
+    let mut params_b = params();
+    params_b.chain_spec_genesis = H256::from([2u8; 32]);
+
+    let chain_a = PrismChain::new(params_a);
+    let chain_b = PrismChain::new(params_b);
+
+    // Domain separation: same slot convention, different chain_spec_genesis
+    // -> different genesis hashes, with overwhelming probability.
+    assert_ne!(chain_a.proposer_genesis, chain_b.proposer_genesis);
+    assert_ne!(chain_a.voter_genesis[0], chain_b.voter_genesis[0]);
+
+    // A block built against network B's proposer genesis, fed to network A's
+    // chain, doesn't resolve to anything -- it's simply unknown, not
+    // accidentally accepted as valid ancestry.
+    let mut chain_a = chain_a;
+    let foreign = proposer_block(1, chain_b.proposer_genesis, vec![], vec![]);
+    let outcome = chain_a.insert_block(foreign);
+    assert_eq!(outcome.missing, vec![chain_b.proposer_genesis]);
+    assert_eq!(chain_a.proposer_best_level, 0, "a foreign-genesis block must never be accepted");
+}
+
+/// B-5: a voter block claiming chain `i` but parented on chain `j`'s genesis
+/// (a different chain of the *same* network) is rejected outright, not
+/// orphaned -- this is exactly the cross-chain-contamination bug per-chain
+/// genesis hashes make detectable at the genesis boundary for the first time.
+#[test]
+fn wrong_chain_genesis_parent_is_rejected_not_orphaned() {
+    let mut chain = PrismChain::new(params());
+    let voter_genesis1 = chain.voter_genesis[1];
+
+    // Claims chain 0, but its parent is chain 1's genesis.
+    let bad = voter_block(1, 0, voter_genesis1, vec![]);
+    let bad_hash = block_hash(&bad.header);
+    let outcome = chain.insert_block(bad);
+
+    assert!(outcome.missing.is_empty(), "must be rejected outright, not treated as missing a fetch");
+    assert!(!chain.orphans.contains_key(&bad_hash), "must not sit in orphans waiting on a parent that will never legitimately arrive");
+    assert_eq!(chain.voter_tips[0].1, 0, "chain 0's tip must not have advanced");
 }

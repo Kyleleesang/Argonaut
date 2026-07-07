@@ -9,7 +9,15 @@ fn fast_params(m: u16) -> Params {
     let difficulty = U256::max_value();
     let total_slots = U256::from(m + 2);
     let f = difficulty / total_slots;
-    Params { m_voter_chains: m, difficulty, f_v: f, f_t: f, f_p: f, target_interval_ms: 1_000 }
+    Params {
+        m_voter_chains: m,
+        difficulty,
+        f_v: f,
+        f_t: f,
+        f_p: f,
+        target_interval_ms: 1_000,
+        chain_spec_genesis: H256::zero(),
+    }
 }
 
 /// Mine one block from `tmpl`, panicking if none is found within a generous
@@ -55,8 +63,8 @@ fn template_tx_and_proposer_parent_is_genesis_when_no_proposers_exist() {
     let m = params.m_voter_chains as usize;
     let tmpl = build_template(&chain, &[], 0, 8, &params);
 
-    assert_eq!(tmpl.parents[m], genesis_sentinel());
-    assert_eq!(tmpl.parents[m + 1], genesis_sentinel());
+    assert_eq!(tmpl.parents[m], chain.proposer_genesis);
+    assert_eq!(tmpl.parents[m + 1], chain.proposer_genesis);
 }
 
 #[test]
