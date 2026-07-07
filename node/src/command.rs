@@ -32,6 +32,8 @@ impl SubstrateCli for Cli {
 
 pub fn run() -> sc_cli::Result<()> {
     let cli = Cli::parse();
+    let prism_prune = cli.prism_prune;
+    let prism_k_prune = cli.prism_k_prune;
 
     match &cli.subcommand {
         Some(Subcommand::Key(cmd)) => cmd.run(&cli),
@@ -168,11 +170,15 @@ pub fn run() -> sc_cli::Result<()> {
                         service::new_full::<sc_network::NetworkWorker<
                             Block,
                             <Block as sp_runtime::traits::Block>::Hash,
-                        >>(config)
+                        >>(config, prism_prune, prism_k_prune)
                         .map_err(sc_cli::Error::Service),
                     sc_network::config::NetworkBackendType::Litep2p =>
-                        service::new_full::<sc_network::Litep2pNetworkBackend>(config)
-                            .map_err(sc_cli::Error::Service),
+                        service::new_full::<sc_network::Litep2pNetworkBackend>(
+                            config,
+                            prism_prune,
+                            prism_k_prune,
+                        )
+                        .map_err(sc_cli::Error::Service),
                 }
             })
         },

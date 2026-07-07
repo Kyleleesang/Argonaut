@@ -123,6 +123,17 @@ impl Verifier<Block> for PrismBridgeVerifier {
 /// every quarter-second whether or not anything had changed. A long
 /// fallback tick remains as a safety net (e.g. the very first check, or if
 /// a signal is ever somehow missed).
+///
+/// B5 pruning: `prune_enabled`/`k_prune` are `--prism-prune`/`--prism-k-prune`
+/// (`node/src/cli.rs`). When enabled, `PrismChain::prune` is called here --
+/// this loop already owns both `prism_chain` and `ledger.confirmed_tip()` in
+/// the same scope `advance` runs in, exactly what `prune`'s
+/// `ledger_confirmed_level` parameter needs, keeping `prism-chain` itself
+/// free of any `prism-ledger` dependency (same crate-boundary discipline
+/// AF-2 established). Only runs on the 5s fallback tick, not on every
+/// notify-driven wakeup (which can fire once per confirmed level) -- pruning
+/// is cheap but not free, and there's no benefit to running it more often
+/// than every few seconds.
 pub async fn run_prism_bridge(
     client: Arc<FullClient>,
     block_import: Arc<FullClient>,
@@ -130,6 +141,8 @@ pub async fn run_prism_bridge(
     prism_db: Arc<PrismDb>,
     k_deep: u64,
     confirmation_notify: Arc<tokio::sync::Notify>,
+    prune_enabled: bool,
+    k_prune: u64,
 ) {
     // B-7: recover the ledger's cursor from the Substrate chain's own
     // best-block number, not a fresh `PrismLedger::new` -- see
@@ -139,10 +152,10 @@ pub async fn run_prism_bridge(
     let mut ledger = PrismLedger::recover(prism_db, best_number);
 
     loop {
-        tokio::select! {
-            _ = confirmation_notify.notified() => {},
-            _ = tokio::time::sleep(Duration::from_secs(5)) => {},
-        }
+        let woke_by_fallback_tick = tokio::select! {
+            _ = confirmation_notify.notified() => false,
+            _ = tokio::time::sleep(Duration::from_secs(5)) => true,
+        };
 
         let confirmed = {
             let chain = prism_chain.lock().expect("PrismChain mutex poisoned");
@@ -166,6 +179,11 @@ pub async fn run_prism_bridge(
                     "failed to build/import block for confirmed leader level {level_no}: {err}"
                 );
             }
+        }
+
+        if prune_enabled && woke_by_fallback_tick {
+            let mut chain = prism_chain.lock().expect("PrismChain mutex poisoned");
+            chain.prune(k_prune, ledger.confirmed_tip());
         }
     }
 }

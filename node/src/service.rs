@@ -107,8 +107,14 @@ pub fn new_partial(config: &Configuration) -> Result<Service, ServiceError> {
 }
 
 /// Builds a new service for a full client.
+///
+/// `prism_prune`/`prism_k_prune` are `--prism-prune`/`--prism-k-prune` off
+/// `node/src/cli.rs`, threaded down to `run_prism_bridge` (see B5 pruning,
+/// `docs/IMPLEMENTATION_AB_FIXPLAN.md`'s "Then: B5 (pruning)").
 pub fn new_full<N: sc_network::NetworkBackend<Block, <Block as sp_runtime::traits::Block>::Hash>>(
     config: Configuration,
+    prism_prune: bool,
+    prism_k_prune: u64,
 ) -> Result<TaskManager, ServiceError> {
     let sc_service::PartialComponents {
         client,
@@ -212,6 +218,8 @@ pub fn new_full<N: sc_network::NetworkBackend<Block, <Block as sp_runtime::trait
             prism_db,
             K_DEEP_CONFIRMATION,
             confirmation_notify,
+            prism_prune,
+            prism_k_prune,
         ),
     );
 

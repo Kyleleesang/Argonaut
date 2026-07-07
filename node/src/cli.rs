@@ -7,6 +7,25 @@ pub struct Cli {
 
     #[command(flatten)]
     pub run: RunCmd,
+
+    /// Enable B5 pruning of old Prism DAG history (`client/prism-chain`'s
+    /// `PrismChain::prune`): voter blocks beyond `--prism-k-prune`, and
+    /// proposer/tx-block bodies for already-confirmed levels. Off by
+    /// default per the pruning design's own operational note
+    /// (`docs/IMPLEMENTATION_AB_FIXPLAN.md`, "Then: B5 (pruning)"): a
+    /// pruning node can't serve full historical backfill (B-6) to a fresh
+    /// peer, so every devnet should keep at least one non-pruning archive
+    /// node running with this flag unset.
+    #[arg(long)]
+    pub prism_prune: bool,
+
+    /// How many blocks behind a voter chain's own tip before that history
+    /// becomes prunable (only read when `--prism-prune` is set). Default is
+    /// a large (10x) multiple of `K_DEEP_CONFIRMATION`, matching the
+    /// pruning design's guidance that this must stay well above stage-1
+    /// confirmation's own reorg-depth assumption.
+    #[arg(long, default_value_t = 60)]
+    pub prism_k_prune: u64,
 }
 
 #[derive(Debug, clap::Subcommand)]
