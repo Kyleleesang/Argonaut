@@ -313,6 +313,7 @@ dependencies = [
  "argonaut-prism-db",
  "parity-scale-codec",
  "sp-core",
+ "tempfile",
 ]
 
 [[package]]

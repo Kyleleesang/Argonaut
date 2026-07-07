@@ -114,6 +114,42 @@ impl PrismLedger {
         PrismLedger { db, confirmed_tip: 0, emitted_tx_hashes: HashSet::new() }
     }
 
+    /// B-7: rebuild a ledger's cursor + tx-dedup state after a restart.
+    ///
+    /// `new` alone is only correct for a genuinely fresh chain: it always
+    /// starts `confirmed_tip` at 0, so on a restarted node with an existing
+    /// DAG, `advance` would re-confirm level 1 all over again and the bridge
+    /// (`node/src/bridge.rs`) would build a *second* Substrate block for it on
+    /// top of the real chain's current tip -- silently re-applying every
+    /// already-settled transaction as brand-new extrinsics.
+    ///
+    /// `confirmed_tip` must come from the Substrate client's own
+    /// `info().best_number` (the bridge's caller reads this), not from this
+    /// crate's own `PROPOSER_LEDGER_ORDER`/`PROPOSER_LEADER_SEQUENCE` columns:
+    /// `advance` writes those *before* the corresponding Substrate block is
+    /// actually built and imported, so if a node crashes mid-import those
+    /// columns can be one level ahead of what was truly committed. The
+    /// Substrate best-block number can never be ahead of reality, so it's the
+    /// only race-free anchor. Because `advance` always writes level ℓ's entry
+    /// before that level's block is returned for import, and import must have
+    /// happened for `best_number` to reflect it, every level in `1..=confirmed_tip`
+    /// is guaranteed to have a `PROPOSER_LEADER_SEQUENCE` entry here.
+    pub fn recover(db: Arc<PrismDb>, confirmed_tip: u64) -> Self {
+        let mut ledger = PrismLedger { db, confirmed_tip: 0, emitted_tx_hashes: HashSet::new() };
+        for level in 1..=confirmed_tip {
+            if let Ok(Some(leader)) =
+                ledger.db.get_h256(columns::PROPOSER_LEADER_SEQUENCE, &level.to_le_bytes())
+            {
+                // Re-run the same DFS+dedup path `advance` uses, purely to
+                // repopulate `emitted_tx_hashes` -- the returned tx list is
+                // discarded, since those txs were already applied in a prior run.
+                let _ = ledger.build_ledger_delta_for_leader(&leader);
+            }
+        }
+        ledger.confirmed_tip = confirmed_tip;
+        ledger
+    }
+
     /// The last level whose delta has already been returned by `advance`.
     pub fn confirmed_tip(&self) -> u64 {
         self.confirmed_tip
@@ -233,3 +269,6 @@ mod tests;
 
 #[cfg(test)]
 mod adversarial_tests;
+
+#[cfg(test)]
+mod honest_split_tests;

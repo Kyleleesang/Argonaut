@@ -57,6 +57,21 @@ impl PrismDb {
         Ok(())
     }
 
+    /// Every block ever accepted (see `BLOCKS` CF — only accepted blocks are
+    /// ever written there; true orphans, missing a dependency, never are), in
+    /// arbitrary (RocksDB key/hash) order. Used by `PrismChain::with_db` to
+    /// reconstruct in-memory DAG state after a restart — order doesn't matter
+    /// there since `insert_block`'s orphan-cascade makes replay convergent
+    /// regardless of the sequence blocks are fed in, as long as the full
+    /// accepted set is eventually covered.
+    pub fn iter_blocks(&self) -> impl Iterator<Item = PrismBlock> + '_ {
+        let cf = self.db.cf_handle(BLOCKS).expect("BLOCKS CF missing");
+        self.db
+            .iterator_cf(cf, rocksdb::IteratorMode::Start)
+            .filter_map(|res| res.ok())
+            .filter_map(|(_, value)| PrismBlock::decode(&mut &value[..]).ok())
+    }
+
     pub fn get_block(&self, hash: &H256) -> Result<Option<PrismBlock>, DbError> {
         let cf = self.db.cf_handle(BLOCKS).expect("BLOCKS CF missing");
         match self.db.get_cf(cf, hash.as_bytes())? {

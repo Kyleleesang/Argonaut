@@ -131,7 +131,12 @@ pub async fn run_prism_bridge(
     k_deep: u64,
     confirmation_notify: Arc<tokio::sync::Notify>,
 ) {
-    let mut ledger = PrismLedger::new(prism_db);
+    // B-7: recover the ledger's cursor from the Substrate chain's own
+    // best-block number, not a fresh `PrismLedger::new` -- see
+    // `PrismLedger::recover`'s doc comment for why a restarted node must not
+    // start replaying confirmed levels from 1 again.
+    let best_number: u64 = client.info().best_number.into();
+    let mut ledger = PrismLedger::recover(prism_db, best_number);
 
     loop {
         tokio::select! {

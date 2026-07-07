@@ -429,3 +429,79 @@ fn insert_block_feeds_the_difficulty_retarget_with_real_timestamps() {
     assert_eq!(chain.params.f_v, chain.params.f_t);
     assert_eq!(chain.params.f_v, chain.params.f_p);
 }
+
+/// B-7: a restarted node must not forget its DAG. Builds a non-trivial chain
+/// (proposers, tx blocks referenced by a proposer, a voter-chain reorg) against
+/// a real `PrismDb`, then opens a *second*, independent `PrismChain::with_db`
+/// against the same on-disk path (simulating a process restart) and checks
+/// every piece of in-memory state a restarted node actually depends on --
+/// mining/voting position, vote accounting, and the unreferenced-block sets
+/// the miner uses to pick what to reference next -- matches exactly.
+#[test]
+fn with_db_recovers_full_dag_state_after_a_restart() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let db = std::sync::Arc::new(PrismDb::open(dir.path()).expect("open PrismDb"));
+    let genesis = genesis_sentinel();
+
+    let mut chain = PrismChain::with_db(params(), db.clone());
+
+    // Proposer chain, with a tx block referenced by the second proposer.
+    let p1 = proposer_block(1, genesis, vec![], vec![]);
+    let p1_hash = block_hash(&p1.header);
+    chain.insert_block(p1);
+
+    let tx = tx_block(2, genesis);
+    let tx_hash = block_hash(&tx.header);
+    chain.insert_block(tx);
+
+    let p2 = proposer_block(3, p1_hash, vec![tx_hash], vec![]);
+    let p2_hash = block_hash(&p2.header);
+    chain.insert_block(p2);
+
+    // p3 explicitly references p2 via `prop_refs` (on top of `p2` also being
+    // its literal DAG parent) so `unreferenced_proposers`' removal path -- the
+    // one that actually depends on `prop_refs`, not the `parent` link -- gets
+    // exercised too: p2 becomes referenced, p1 and p3 do not.
+    let p3 = proposer_block(4, p2_hash, vec![], vec![p2_hash]);
+    let p3_hash = block_hash(&p3.header);
+    chain.insert_block(p3);
+    let unreferenced_tx = tx_block(5, genesis);
+    let unreferenced_tx_hash = block_hash(&unreferenced_tx.header);
+    chain.insert_block(unreferenced_tx);
+
+    // A voter-chain reorg (same shape as `voter_chain_reorg_rolls_back_and_reapplies_votes`)
+    // so restart recovery is checked against non-trivial vote accounting, not
+    // just a freshly-accepted, never-superseded vote.
+    let mut nonce = 0u64;
+    let a1 = ins(&mut chain, genesis, vec![p1_hash], &mut nonce);
+    ins(&mut chain, a1, vec![p2_hash], &mut nonce);
+    let b1 = ins(&mut chain, genesis, vec![p1_hash], &mut nonce);
+    let b2 = ins(&mut chain, b1, vec![], &mut nonce);
+    ins(&mut chain, b2, vec![], &mut nonce);
+
+    assert_eq!(chain.vote_totals(), chain.recount_votes());
+
+    // "Restart": drop the first `PrismChain` (the `PrismDb` handle stays
+    // alive via the `Arc`, exactly as it would across a real process restart
+    // where the *files on disk* persist, not the in-process handle) and open
+    // a brand new one against the same path.
+    drop(chain);
+    let recovered = PrismChain::with_db(params(), db);
+
+    assert_eq!(recovered.proposer_best_level, 3);
+    assert_eq!(recovered.level_proposer.get(&1), Some(&p1_hash));
+    assert_eq!(recovered.level_proposer.get(&2), Some(&p2_hash));
+    assert_eq!(recovered.level_proposer.get(&3), Some(&p3_hash));
+    assert_eq!(recovered.voter_tips[0].1, 3, "chain 0's tip should be the longer b-fork (b1,b2,b3)");
+    assert!(!recovered.unreferenced_tx_blocks.contains(&tx_hash), "tx referenced by p2 stays referenced");
+    assert!(recovered.unreferenced_tx_blocks.contains(&unreferenced_tx_hash));
+    assert!(recovered.unreferenced_proposers.contains(&p1_hash), "p1 is never listed in anyone's prop_refs");
+    assert!(!recovered.unreferenced_proposers.contains(&p2_hash), "p3's prop_refs references p2");
+    assert!(recovered.unreferenced_proposers.contains(&p3_hash), "p3 is the tip, referenced by nobody");
+    assert_eq!(recovered.vote_totals(), recovered.recount_votes());
+    assert_eq!(
+        recovered.vote_totals(),
+        [(p1_hash, 1u64)].into_iter().collect::<std::collections::HashMap<_, _>>(),
+        "only the surviving b-fork's vote for p1 should remain after the reorg"
+    );
+}

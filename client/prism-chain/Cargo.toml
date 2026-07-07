@@ -12,3 +12,4 @@ argonaut-prism-db = { path = "../prism-db" }
 
 [dev-dependencies]
 sp-core = { workspace = true, features = ["std"] }
+tempfile = "3"

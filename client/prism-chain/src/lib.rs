@@ -97,6 +97,15 @@ pub struct PrismChain {
     /// B-2: rolling-window difficulty retarget, fed one timestamp per
     /// accepted block (any content type -- see `observe_for_retarget`).
     retarget: DifficultyRetarget,
+    /// B-7: set for the duration of `with_db`'s startup replay. Suppresses
+    /// `observe_for_retarget` (replay order isn't guaranteed to match live
+    /// arrival order, so re-feeding the rolling window from replay could
+    /// clobber the just-restored `CURRENT_DIFFICULTY_TARGET` with a value
+    /// computed from a different window than actually occurred -- the
+    /// restored target is authoritative; the window simply refills from
+    /// scratch as new blocks arrive post-restart) and re-persisting blocks
+    /// that are, by construction, already the ones being read back from `db`.
+    replaying: bool,
 }
 
 /// Shared genesis sentinel used by every voter chain and the proposer tree.
@@ -136,6 +145,7 @@ impl PrismChain {
             proposer_meta,
             db: None,
             retarget: DifficultyRetarget::new(),
+            replaying: false,
         }
     }
 
@@ -145,12 +155,31 @@ impl PrismChain {
     /// Also restores the last-persisted difficulty target (B-2), if any, so a
     /// restart resumes from wherever retargeting last left off instead of
     /// `params`'s initial guess every time.
+    ///
+    /// B-7: replays every previously-accepted block from `db` to rebuild the
+    /// in-memory DAG indices (`proposer_meta`, `voter_meta`, `votes`,
+    /// `voter_tips`, ...) that `PrismChain::new` alone leaves empty --
+    /// without this, a restarted node forgets its entire DAG and starts
+    /// mining/voting from genesis again while the bridge (`node/src/bridge.rs`)
+    /// still believes those levels were never confirmed, silently
+    /// re-deriving and re-importing Substrate blocks that already exist.
+    /// Feeding order doesn't matter: only ever-*accepted* blocks are
+    /// persisted (see `insert_block`'s content-type arms), so every
+    /// dependency of a stored block is itself guaranteed to be in the
+    /// stored set, and `insert_block`'s orphan-cascade (`drain_orphans`,
+    /// called after every acceptance, recursively) resolves the full set
+    /// to a fixed point regardless of the order it's fed in.
     pub fn with_db(mut params: Params, db: Arc<PrismDb>) -> Self {
         if let Ok(Some(target)) = db.get_u256(columns::CURRENT_DIFFICULTY_TARGET, b"current") {
             params.set_combined_target(target);
         }
         let mut chain = Self::new(params);
-        chain.db = Some(db);
+        chain.db = Some(db.clone());
+        chain.replaying = true;
+        for block in db.iter_blocks() {
+            chain.insert_block(block);
+        }
+        chain.replaying = false;
         chain
     }
 
@@ -162,6 +191,9 @@ impl PrismChain {
     /// unconditionally at `insert_block`'s entry instead of from each
     /// content-type's "accepted" arm.
     fn observe_for_retarget(&mut self, timestamp_ms: u64) {
+        if self.replaying {
+            return;
+        }
         if let Some(new_target) =
             self.retarget.observe(timestamp_ms, self.params.target_interval_ms, self.params.difficulty)
         {
@@ -461,6 +493,9 @@ impl PrismChain {
     }
 
     fn persist(&self, block: &PrismBlock) {
+        if self.replaying {
+            return; // already on disk -- that's where replay just read it from
+        }
         if let Some(db) = &self.db {
             let _ = db.insert_block(block);
         }
