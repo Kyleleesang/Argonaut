@@ -105,6 +105,26 @@ fn sibling_proposers_at_same_level_do_not_reset_unvoted_marker() {
 }
 
 #[test]
+fn proposers_at_level_includes_siblings_never_added_to_unvoted_levels() {
+    let mut chain = PrismChain::new(params());
+    let genesis = genesis_sentinel();
+    let p1 = proposer_block(1, genesis, vec![], vec![]);
+    let p1_hash = block_hash(&p1.header);
+    chain.insert_block(p1);
+
+    let p1b = proposer_block(2, genesis, vec![], vec![]);
+    let p1b_hash = block_hash(&p1b.header);
+    chain.insert_block(p1b);
+
+    let mut at_level_1 = chain.proposers_at_level(1);
+    at_level_1.sort();
+    let mut expected = vec![p1_hash, p1b_hash];
+    expected.sort();
+    assert_eq!(at_level_1, expected);
+    assert_eq!(chain.proposers_at_level(2), Vec::<H256>::new());
+}
+
+#[test]
 fn tx_block_referenced_by_proposer_becomes_referenced() {
     let mut chain = PrismChain::new(params());
     let genesis = genesis_sentinel();

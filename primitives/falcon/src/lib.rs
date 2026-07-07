@@ -41,9 +41,16 @@ pub enum ArgonautSignature {
     /// and must never be accepted by the default `Checkable` signature check alone.
     Falcon { sig: FalconSignature },
 
-    /// Dev-only escape hatch — compiled out of the runtime whenever the wasm (`no_std`)
-    /// side is built, since that side never enables the `std` feature.
-    #[cfg(feature = "std")]
+    /// Dev-only escape hatch (sr25519 bootstrap signing, e.g. `//Alice`-style dev
+    /// accounts). Deliberately *not* `#[cfg(feature = "std")]`-gated: `Verify` for
+    /// `sr25519::Signature` (`sp_runtime::traits`) dispatches to the `sp_io::crypto`
+    /// host function and works fine in wasm, same as any other Substrate chain's
+    /// sr25519 accounts. Gating this variant out of the wasm build while native
+    /// tooling (this crate's own `std`-only callers) kept emitting it created a
+    /// SCALE wire-format mismatch: the two builds disagreed on this enum's variant
+    /// count, so the wasm runtime couldn't even decode an extrinsic signed this way
+    /// -- found live, via `TaggedTransactionQueue_validate_transaction` trapping
+    /// with `wasm unreachable` on a perfectly well-formed signed extrinsic.
     Sr25519(sp_core::sr25519::Signature),
 }
 
@@ -94,7 +101,6 @@ impl Verify for ArgonautSignature {
             // by the `CheckFalconSignature` TransactionExtension, which does have
             // storage access to look the key up.
             ArgonautSignature::Falcon { .. } => false,
-            #[cfg(feature = "std")]
             ArgonautSignature::Sr25519(sig) => sig.verify(msg, &who.into()),
         }
     }

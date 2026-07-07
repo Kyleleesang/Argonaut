@@ -80,8 +80,9 @@ pub fn run() -> sc_cli::Result<()> {
             runner.async_run(|config| {
                 let PartialComponents { client, task_manager, backend, .. } =
                     service::new_partial(&config)?;
-                // No finality gadget in B0 (see node/src/pow.rs) -- nothing extra to
-                // revert beyond what `cmd.run` already handles for the base client.
+                // No finality gadget to revert: the Prism bridge (node/src/bridge.rs)
+                // imports every block already `finalized: true`, so there's nothing
+                // extra beyond what `cmd.run` already handles for the base client.
                 Ok((cmd.run(client, backend, None), task_manager))
             })
         },

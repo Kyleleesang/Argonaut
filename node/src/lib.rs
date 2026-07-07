@@ -1,9 +1,9 @@
 pub mod benchmarking;
+pub mod bridge;
 pub mod chain_spec;
 pub mod cli;
 pub mod command;
 pub mod falcon_sign;
 pub mod keygen;
-pub mod pow;
 pub mod rpc;
 pub mod service;

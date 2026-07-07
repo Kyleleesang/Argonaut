@@ -392,6 +392,21 @@ impl PrismChain {
         self.proposer_meta.get(hash).map(|m| m.level)
     }
 
+    /// Every known proposer block at `level`, canonical or not (sibling
+    /// proposers arriving after a level's first-seen one are still recorded
+    /// in `proposer_meta` -- see `insert_proposer` -- just never added to
+    /// any chain's `unvoted_levels`). Needed by stage-2 confirmation
+    /// (architecture guide §3.8, paper Definition 4.5), which must reason
+    /// about every proposer *contending* at a level, not just the one
+    /// honest miners default to voting for.
+    pub fn proposers_at_level(&self, level: u64) -> Vec<H256> {
+        self.proposer_meta
+            .iter()
+            .filter(|(_, meta)| meta.level == level)
+            .map(|(hash, _)| *hash)
+            .collect()
+    }
+
     /// The current leader at `level`: the proposer at that level with the
     /// most votes, tie-broken by hash for determinism. `None` if no proposer
     /// is known at that level yet.

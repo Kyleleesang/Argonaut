@@ -1,16 +1,18 @@
-use crate::pow::{seal_value, Blake3Pow};
+use crate::bridge::{run_prism_bridge, PrismBridgeVerifier};
 use futures::FutureExt;
 use argonaut_primitives_prism::Params as PrismParams;
 use argonaut_prism_chain::PrismChain;
 use argonaut_prism_db::PrismDb;
+use argonaut_prism_ledger::K_DEEP_CONFIRMATION;
 use argonaut_prism_miner::{build_template, PrismMiner};
 use argonaut_prism_network::wire::{blocks_protocol_config, sync_protocol_config, PrismNetworkWorker};
 use argonaut_runtime::{self, opaque::Block, RuntimeApi};
+use parity_scale_codec::Encode;
 use sc_client_api::Backend;
-use sc_consensus_pow::PowBlockImport;
+use sc_consensus::import_queue::{BasicQueue, BoxBlockImport};
 use sc_service::{error::Error as ServiceError, Configuration, TaskManager};
 use sc_telemetry::{Telemetry, TelemetryWorker};
-use sc_transaction_pool_api::OffchainTransactionPoolFactory;
+use sc_transaction_pool_api::{InPoolTransaction, OffchainTransactionPoolFactory, TransactionPool};
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
@@ -24,23 +26,7 @@ pub type FullClient =
     sc_service::TFullClient<Block, RuntimeApi, sc_executor::WasmExecutor<HostFunctions>>;
 type FullBackend = sc_service::TFullBackend<Block>;
 type FullSelectChain = sc_consensus::LongestChain<FullBackend, Block>;
-type FullPowBlockImport =
-    PowBlockImport<Block, Arc<FullClient>, FullClient, FullSelectChain, Blake3Pow, Box<
-        dyn Fn(
-                <Block as sp_runtime::traits::Block>::Hash,
-                (),
-            ) -> std::pin::Pin<
-                Box<
-                    dyn std::future::Future<
-                            Output = Result<
-                                sp_timestamp::InherentDataProvider,
-                                Box<dyn std::error::Error + Send + Sync>,
-                            >,
-                        > + Send,
-                >,
-            > + Send
-            + Sync,
-    >>;
+
 
 pub type Service = sc_service::PartialComponents<
     FullClient,
@@ -48,7 +34,7 @@ pub type Service = sc_service::PartialComponents<
     FullSelectChain,
     sc_consensus::DefaultImportQueue<Block>,
     sc_transaction_pool::TransactionPoolHandle<Block, FullClient>,
-    (FullPowBlockImport, Option<Telemetry>),
+    Option<Telemetry>,
 >;
 
 pub fn new_partial(config: &Configuration) -> Result<Service, ServiceError> {
@@ -90,35 +76,23 @@ pub fn new_partial(config: &Configuration) -> Result<Service, ServiceError> {
         .build(),
     );
 
-    let pow_block_import = PowBlockImport::new(
-        client.clone(),
-        client.clone(),
-        Blake3Pow,
-        0,
-        select_chain.clone(),
-        Box::new(|_, ()| -> std::pin::Pin<
-            Box<
-                dyn std::future::Future<
-                        Output = Result<
-                            sp_timestamp::InherentDataProvider,
-                            Box<dyn std::error::Error + Send + Sync>,
-                        >,
-                    > + Send,
-            >,
-        > {
-            Box::pin(async move {
-                Ok(sp_timestamp::InherentDataProvider::from_system_time())
-            })
-        }) as _,
-    );
-
-    let import_queue = sc_consensus_pow::import_queue(
-        Box::new(pow_block_import.clone()),
+    // B3: the Prism bridge (`node/src/bridge.rs`) is the only block author --
+    // it derives one Substrate block per confirmed Prism leader level and
+    // imports it directly (bypassing this queue entirely). This queue only
+    // ever sees blocks arriving over the network via ordinary Substrate block
+    // sync (e.g. a node catching up after being offline). `PrismBridgeVerifier`
+    // marks every such block finalized/always-best, matching how the bridge
+    // itself imports self-authored blocks -- the real safety check is the
+    // default `StateAction::Execute` re-executing the block against the
+    // runtime, same as any other Substrate import.
+    let block_import: BoxBlockImport<Block> = Box::new(client.clone());
+    let import_queue = BasicQueue::new(
+        PrismBridgeVerifier,
+        block_import,
         None,
-        Blake3Pow,
         &task_manager.spawn_essential_handle(),
         config.prometheus_registry(),
-    )?;
+    );
 
     Ok(sc_service::PartialComponents {
         client,
@@ -128,7 +102,7 @@ pub fn new_partial(config: &Configuration) -> Result<Service, ServiceError> {
         keystore_container,
         select_chain,
         transaction_pool,
-        other: (pow_block_import, telemetry),
+        other: telemetry,
     })
 }
 
@@ -142,9 +116,9 @@ pub fn new_full<N: sc_network::NetworkBackend<Block, <Block as sp_runtime::trait
         mut task_manager,
         import_queue,
         keystore_container,
-        select_chain,
+        select_chain: _,
         transaction_pool,
-        other: (pow_block_import, mut telemetry),
+        other: mut telemetry,
     } = new_partial(&config)?;
 
     let mut net_config = sc_network::config::FullNetworkConfiguration::<
@@ -175,26 +149,29 @@ pub fn new_full<N: sc_network::NetworkBackend<Block, <Block as sp_runtime::trait
             import_queue,
             block_announce_validator_builder: None,
             // No warp sync: that mechanism piggybacks on GRANDPA's authority-set
-            // proofs, which this B0 rehearsal chain doesn't have. Full sync is fine
-            // for a devnet.
+            // proofs, which this chain doesn't have (Prism is ε-final; see B3's
+            // bridge in `node/src/bridge.rs`). Full sync is fine for a devnet.
             warp_sync_config: None,
             block_relay: None,
             metrics,
         })?;
 
-    // B2: Prism runs entirely alongside the B0 PoW chain above -- separate DB,
-    // separate DAG state machine, separate gossip/sync protocols. It doesn't
-    // yet drive the actual Substrate chain (that's B3's job); this is purely
-    // the miner+network rehearsal the architecture guide's B2 milestone asks for.
+    // B1-B3: Prism runs entirely client-side (architecture guide §3.1) -- its
+    // own DAG state machine, gossip/sync protocols, miner, and (B3) the bridge
+    // that derives the actual Substrate chain from confirmed leader levels.
     //
-    // Deliberately NOT `Params::testnet()`: at m=100 voter chains, testnet's
-    // difficulty (calibrated for a single-target PoW chain, see node/src/pow.rs)
-    // produces several *dozen* Prism blocks per second on one CPU, since any of
-    // the 102 slots succeeding counts as a find. Empirically that flood of
+    // Deliberately NOT `Params::testnet()` unmodified: at m=100 voter chains,
+    // testnet's difficulty (calibrated for a single-target PoW chain) produces
+    // several *dozen* Prism blocks per second on one CPU, since any of the 102
+    // slots succeeding counts as a find. Empirically that flood of
     // notifications was enough to trip peer reputation/rate-limiting and drop
-    // the connection within a couple of seconds during live two-node testing.
-    // Scaled down ~100x (roughly `log2(102)` extra bits) to land in the same
-    // single-digit-second range as the tuned B0 PoW target.
+    // the connection within a couple of seconds during live two-node testing
+    // (B2). Scaled down ~100x (roughly `log2(102)` extra bits) to land in a
+    // manageable single-digit-second range -- `f_v`/`f_t`/`f_p` are scaled
+    // identically alongside `difficulty` so the m=100 slot split is preserved
+    // exactly (only `m_voter_chains` itself would need `f_v`/`f_t`/`f_p`
+    // rederiving from scratch, per `client/prism-ledger`'s own devnet-tuning
+    // notes in `docs/IMPLEMENTATION_B_PROGRESS.md`).
     let prism_params = {
         let mut p = PrismParams::testnet();
         p.difficulty = p.difficulty >> 7;
@@ -214,10 +191,21 @@ pub fn new_full<N: sc_network::NetworkBackend<Block, <Block as sp_runtime::trait
         prism_sync_rx,
         network.clone(),
         prism_chain.clone(),
-        prism_db,
+        prism_db.clone(),
         prism_params.clone(),
     );
     task_manager.spawn_handle().spawn("prism-network", Some("prism"), prism_worker.run());
+
+    // B3: every full node -- authority or not -- runs the bridge. Prism
+    // confirmation is a deterministic function of the DAG every node already
+    // observes via gossip above, so every honest node derives byte-identical
+    // Substrate blocks independently; this isn't gated on being a block
+    // author the way PoW/PoA authorship would be.
+    task_manager.spawn_handle().spawn(
+        "prism-bridge",
+        Some("prism"),
+        run_prism_bridge(client.clone(), client.clone(), prism_chain.clone(), prism_db, K_DEEP_CONFIRMATION),
+    );
 
     if config.offchain_worker.enabled {
         let offchain_workers =
@@ -241,7 +229,6 @@ pub fn new_full<N: sc_network::NetworkBackend<Block, <Block as sp_runtime::trait
     }
 
     let role = config.role;
-    let prometheus_registry = config.prometheus_registry().cloned();
 
     let rpc_extensions_builder = {
         let client = client.clone();
@@ -268,92 +255,33 @@ pub fn new_full<N: sc_network::NetworkBackend<Block, <Block as sp_runtime::trait
     })?;
 
     if role.is_authority() {
-        let proposer_factory = sc_basic_authorship::ProposerFactory::new(
-            task_manager.spawn_handle(),
-            client.clone(),
-            transaction_pool.clone(),
-            prometheus_registry.as_ref(),
-            telemetry.as_ref().map(|x| x.handle()),
-        );
-
-        let (worker, worker_task) = sc_consensus_pow::start_mining_worker(
-            Box::new(pow_block_import),
-            client.clone(),
-            select_chain,
-            Blake3Pow,
-            proposer_factory,
-            sync_service.clone(),
-            sync_service.clone(),
-            None,
-            move |_, ()| async move {
-                Ok::<_, Box<dyn std::error::Error + Send + Sync>>(
-                    sp_timestamp::InherentDataProvider::from_system_time(),
-                )
-            },
-            Duration::from_secs(10),
-            Duration::from_secs(5),
-        );
-
-        task_manager
-            .spawn_essential_handle()
-            .spawn_blocking("pow-mining-worker", Some("block-authoring"), worker_task);
-
-        // The CPU-bound nonce search itself. Runs on a plain OS thread rather than
-        // through `task_manager`'s spawn_blocking: `MiningHandle::submit` holds a
-        // `parking_lot` mutex guard (`!Send`) across an `.await` internally, so its
-        // returned future isn't `Send` and can't satisfy spawn_blocking's bound.
-        // `block_on` sidesteps that -- it only requires the *thread* to block, not
-        // the future to be `Send`.
-        std::thread::spawn(move || {
-            // Keeps climbing across outer-loop iterations (never reset to 0):
-            // resetting per-iteration would re-search the exact same nonce range
-            // forever whenever a batch happens not to contain a solution.
-            let mut nonce: u64 = 0;
-            loop {
-                let Some(metadata) = worker.metadata() else {
-                    std::thread::sleep(Duration::from_millis(100));
-                    continue;
-                };
-                let version = worker.version();
-
-                let mut found = None;
-                for _ in 0..200_000u64 {
-                    if seal_value(metadata.pre_hash.as_ref(), nonce) <= metadata.difficulty {
-                        found = Some(nonce);
-                        nonce = nonce.wrapping_add(1);
-                        break;
-                    }
-                    nonce = nonce.wrapping_add(1);
-                }
-
-                if let Some(found_nonce) = found {
-                    if worker.version() == version {
-                        let seal = found_nonce.to_le_bytes().to_vec();
-                        futures::executor::block_on(worker.submit(seal));
-                    }
-                }
-            }
-        });
-
-        // B2: Prism mining, entirely separate from the PoW mining loop above --
-        // no mempool wired up yet (transaction pool integration is out of scope
-        // for this rehearsal), so every template's tx slot is empty. Mined
-        // blocks go to `prism_mined_tx`, which `PrismNetworkWorker::run` (spawned
-        // above) picks up, inserts into `prism_chain`, and gossips to peers.
+        // B2/B3: Prism mining -- unrelated to Substrate block authorship
+        // (that's the bridge above). Mined blocks go to `prism_mined_tx`,
+        // which `PrismNetworkWorker::run` (spawned above) picks up, inserts
+        // into `prism_chain`, and gossips to peers.
         let prism_miner = Arc::new(PrismMiner::new(prism_params.clone()));
         prism_miner.clone().spawn_mining_thread(0, move |block| {
             let _ = prism_mined_tx.unbounded_send(block);
         });
 
-        // Keeps the miner's template in sync with the DAG: since there's no
-        // mempool yet, only the parent/vote/reference slots ever change.
+        // Keeps the miner's template in sync with the DAG and the live tx
+        // pool. B3: pulls ready extrinsics' encoded bytes from the pool on
+        // every refresh -- previously this was always `&[]` (no mempool
+        // wired up at all), which meant no user-submitted transaction could
+        // ever reach a Prism tx block. `.data().encode()` reproduces the
+        // exact SCALE bytes the bridge later decodes back via
+        // `OpaqueExtrinsic::from_bytes` (both sides agree on the same wire
+        // format because they're the same bytes, just round-tripped).
+        let mempool_pool = transaction_pool.clone();
         std::thread::spawn(move || {
             let mut queue: u64 = 0;
             loop {
                 std::thread::sleep(Duration::from_millis(500));
+                let mempool: Vec<Vec<u8>> =
+                    mempool_pool.ready().map(|tx| tx.data().encode()).collect();
                 let tmpl = {
                     let chain = prism_chain.lock().expect("PrismChain mutex poisoned");
-                    build_template(&chain, &[], queue, 8, &prism_params)
+                    build_template(&chain, &mempool, queue, 8, &prism_params)
                 };
                 prism_miner.refresh(tmpl);
                 queue = (queue + 1) % 8;

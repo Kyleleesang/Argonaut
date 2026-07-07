@@ -11,3 +11,7 @@ blake3 = { workspace = true, features = ["std"] }
 argonaut-primitives-prism = { path = "../../primitives/prism" }
 argonaut-prism-chain = { path = "../prism-chain" }
 argonaut-prism-db = { path = "../prism-db" }
+
+[dev-dependencies]
+tempfile = "3"
+sp-core = { workspace = true, features = ["std"] }

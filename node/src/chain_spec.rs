@@ -68,9 +68,10 @@ pub fn local_testnet_config() -> Result<ChainSpec, String> {
     .build())
 }
 
-// B0: no Aura/GRANDPA authority set to seed -- sc-consensus-pow authors blocks
-// client-side (any node with `--validator`/authority role mines), and there's no
-// finality gadget yet (see node/src/pow.rs).
+// No Aura/GRANDPA authority set to seed: Prism (client-side consensus, see
+// architecture guide §3) determines block content, and the B3 bridge
+// (node/src/bridge.rs) imports every Substrate block already finalized --
+// there's no separate finality gadget to configure.
 fn testnet_genesis(root_key: AccountId, endowed_accounts: Vec<AccountId>) -> serde_json::Value {
     serde_json::json!({
         "balances": {

@@ -214,10 +214,12 @@ dependencies = [
  "argonaut-primitives-prism",
  "argonaut-prism-chain",
  "argonaut-prism-db",
+ "argonaut-prism-ledger",
  "argonaut-prism-miner",
  "argonaut-prism-network",
  "argonaut-runtime",
  "async-channel 1.8.0",
+ "async-trait",
  "blake3",
  "chacha20poly1305",
  "clap",
@@ -228,17 +230,18 @@ dependencies = [
  "futures",
  "hex",
  "jsonrpsee 0.24.11",
+ "log",
  "pallet-transaction-payment",
  "pallet-transaction-payment-rpc",
  "parity-scale-codec",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
  "sc-basic-authorship",
+ "sc-block-builder",
  "sc-chain-spec",
  "sc-cli",
  "sc-client-api",
  "sc-consensus",
- "sc-consensus-pow",
  "sc-executor",
  "sc-keystore",
  "sc-network",
@@ -255,7 +258,6 @@ dependencies = [
  "sp-block-builder",
  "sp-blockchain",
  "sp-consensus",
- "sp-consensus-pow",
  "sp-core",
  "sp-inherents",
  "sp-io",
@@ -334,6 +336,8 @@ dependencies = [
  "argonaut-prism-db",
  "blake3",
  "parity-scale-codec",
+ "sp-core",
+ "tempfile",
 ]
 
 [[package]]
@@ -8299,31 +8303,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sc-consensus-pow"
-version = "0.47.0"
-source = "git+https://github.com/paritytech/polkadot-sdk?branch=stable2412#33663108c248b645ef106e4e9d07598d34ac89ac"
-dependencies = [
- "async-trait",
- "futures",
- "futures-timer",
- "log",
- "parity-scale-codec",
- "parking_lot 0.12.5",
- "sc-client-api",
- "sc-consensus",
- "sp-api",
- "sp-block-builder",
- "sp-blockchain",
- "sp-consensus",
- "sp-consensus-pow",
- "sp-core",
- "sp-inherents",
- "sp-runtime",
- "substrate-prometheus-endpoint",
- "thiserror 1.0.69",
-]
-
-[[package]]
 name = "sc-executor"
 version = "0.41.0"
 source = "git+https://github.com/paritytech/polkadot-sdk?branch=stable2412#33663108c248b645ef106e4e9d07598d34ac89ac"
@@ -9881,17 +9860,6 @@ dependencies = [
  "sp-application-crypto",
  "sp-core",
  "sp-keystore",
- "sp-runtime",
-]
-
-[[package]]
-name = "sp-consensus-pow"
-version = "0.41.0"
-source = "git+https://github.com/paritytech/polkadot-sdk?branch=stable2412#33663108c248b645ef106e4e9d07598d34ac89ac"
-dependencies = [
- "parity-scale-codec",
- "sp-api",
- "sp-core",
  "sp-runtime",
 ]
 
