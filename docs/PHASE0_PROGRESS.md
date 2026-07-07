@@ -7,9 +7,9 @@ Tracks status against the acceptance criteria in [`ARGONAUT_ARCHITECTURE_GUIDE.m
 | Acceptance criterion (§1.2) | Status |
 |---|---|
 | `cargo build --release` green | ✅ verified — clean release build incl. wasm runtime (`-Z build-std`), 15m43s, exit 0 |
-| `--dev` node produces blocks under Aura | ✅ verified — ran the release binary with `--dev`; imported blocks #1–#6, finalizing under GRANDPA, ~6s block time, no errors |
+| `--dev` node produces blocks under Aura | ✅ verified — ran the release binary with `--dev`; imported blocks #1–#6, finalizing under GRANDPA, ~6s block time, no errors (superseded since by B0-B3's Aura/GRANDPA→Prism swap; not re-verified against this criterion's original wording) |
 | `cargo test` green | ✅ all crates pass (0 failures) |
-| CI added for `wasm32-unknown-unknown` runtime build | ⬜ not started — no CI config exists yet |
+| CI added for `wasm32-unknown-unknown` runtime build | ⬜ **not met, and the existing config is misleading.** A pre-migration `.github/workflows/check.yml` exists (predates this session's Phase 0 fixes), but it (a) triggers only on `main`, while all work happens on `Base` per this doc's own note below — it never runs; (b) runs `cargo check --release` with `SKIP_WASM_BUILD=1`, i.e. it explicitly *skips* the one build this criterion asks to check; (c) predates `dev-signatures` and every crate added since. Needs a real rewrite (branch trigger, drop `SKIP_WASM_BUILD`, `cargo test --workspace`), not just enabling what's there. |
 
 ## Timeline
 
@@ -39,7 +39,7 @@ Tracks status against the acceptance criteria in [`ARGONAUT_ARCHITECTURE_GUIDE.m
 
 ## Remaining before Phase 0 can be called fully done
 
-- [ ] Add CI (e.g. GitHub Actions) that runs `cargo build --release`, `cargo test --workspace`, and a dedicated `wasm32-unknown-unknown` runtime build check. This is the only unmet item from §1.2's acceptance criteria.
+- [ ] Fix/rewrite `.github/workflows/check.yml` (exists but doesn't count — see table above): trigger on `Base` (not just `main`), run `cargo build --release` and `cargo test --workspace` without `SKIP_WASM_BUILD`, and add a dedicated `wasm32-unknown-unknown` runtime build check. This is the only unmet item from §1.2's acceptance criteria.
 - [ ] Clean up lingering warnings: unused imports in `client/prism-chain`, `client/prism-miner`, `client/aggregator`, `node/src/chain_spec.rs`; deprecated `create_runtime_str!` macro in `runtime/src/lib.rs` (should move to `Cow::Borrowed`).
 - [ ] `cargo report future-incompatibilities` flagged `subxt v0.37.0` (a transitive dep, pulled in via `frame-benchmarking-cli`) as containing code that a future Rust version will reject. Not urgent, but worth tracking — likely resolved by a future polkadot-sdk bump.
 

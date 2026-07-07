@@ -10,7 +10,34 @@
 4. **Check the box** (`- [ ]` → `- [x]`) and add a one-line note when an item is done, so the next session sees progress. If you get blocked, leave the box unchecked and write why.
 5. **When a fix needs a decision you can't derive** (notably B-3's `δ_d` transcription — see that item), stop and ask the user rather than guessing at consensus-safety math.
 6. Update [`IMPLEMENTATION_B_PROGRESS.md`](./IMPLEMENTATION_B_PROGRESS.md) / [`IMPLEMENTATION_A_PROGRESS.md`](./IMPLEMENTATION_A_PROGRESS.md) as items land, so the progress docs stay the source of truth.
-7. **Don't trust a piped `cargo test`'s exit code.** `cargo test --workspace 2>&1 | tail -N` reports `tail`'s exit code, not `cargo test`'s -- it will read as `0` (success) even when a test failed. This bit this exact fix-plan session once (a real, since-fixed test failure was briefly reported as "exit code 0" by the pipeline). Either check the actual `test result: ... FAILED` lines in the output, or redirect to a file (`cargo test --workspace > out.log 2>&1; echo $?`) instead of piping through another command.
+7. **Don't trust a piped `cargo test`'s exit code.**
+8. Update [`IMPLEMENTATION_AB_REVIEW.md`](./IMPLEMENTATION_AB_REVIEW.md)'s per-finding `Status` lines too when a finding's state changes — it's the "why," and now carries one-line pointers back to this doc, so keep both in sync.
+
+---
+
+## Outstanding TODOs (updated 2026-07-07) — read this before picking an item
+
+Everything below is either fully open or has a "done, but" gap. Checked items above (`[x]`) mean *code done*; this list is what's actually left before each one can be called closed.
+
+**Live-verification debt on already-"done" items (code correct, never run against a real devnet):**
+- [ ] B-1/AF-4: two-node `chain_getBlockHash(n)` byte-diff across many levels (the literal B3/B-1 acceptance criterion); plus the AF-4 determinism choke-point assert/test (re-deriving the same level on two `PrismChain`s yields byte-identical `BlockImportParams`).
+- [ ] A-1: confirm a production wasm build (no `dev-signatures`) actually rejects an sr25519-signed extrinsic at `TaggedTransactionQueue_validate_transaction`.
+- [ ] B-2: confirm retargeting actually moves the observed block interval toward `target_interval_ms` on a running devnet (single node holds steady → second miner joins → interval returns to target).
+- [ ] AF-1: measure the actual confirmation-to-Substrate-block latency improvement from the `Notify`-based wakeup.
+- [ ] B-4: measure that the devnet confirms levels faster with stage-2 live than stage-1 alone.
+- [ ] B-7/AF-5: live-devnet restart with a non-trivial DAG (unit-tested only so far).
+
+**Fully open items, in priority order (per the review's "Updated fix order"):**
+- [ ] 7. B-6: initial sync / historical backfill — detailed plan written, not implemented. Depends on B-8 for `--network-backend litep2p` support (inherits the libp2p-only requirement until then).
+- [ ] 10. B-5: per-chain genesis hashes — detailed plan written, not implemented. Breaking change (existing devnet DBs must be purged/remined).
+- [ ] 11. B-8: port sync-request off litep2p's `unimplemented!()` async `request` to `start_request`.
+- [ ] 12. B-10: docker-compose devnet artifact; mirror default peer-set membership.
+- [ ] 13. A-3/A-4: registry-mode transaction-builder tooling; size-assertion test; optional auto-register.
+- [ ] 9. AF-3: finer-grained DAG concurrency — only when measured to matter, not before.
+- [ ] B-3's exact `δ_d`/Appendix E.1 as the *operating default* (the faithful port exists — `paper_k_min`/`paper_delta_d` — but is deliberately not wired in; see item 5's notes on why it would make stage-2 slower, not faster, as-is).
+- [ ] B5 (pruning, separate from B-5 above) — blocked on B-7's index-CF population (still deferred, see item 6).
+
+Not on this list because they're resolved with nothing further to do: AF-2 (moved), B-9 (root-caused — see its own item 8, no fix intended). A-2 needs no fix (deviation permitted by the guide). `cargo test --workspace 2>&1 | tail -N` reports `tail`'s exit code, not `cargo test`'s -- it will read as `0` (success) even when a test failed. This bit this exact fix-plan session once (a real, since-fixed test failure was briefly reported as "exit code 0" by the pipeline). Either check the actual `test result: ... FAILED` lines in the output, or redirect to a file (`cargo test --workspace > out.log 2>&1; echo $?`) instead of piping through another command.
 
 ---
 
@@ -29,7 +56,7 @@
 
 **Verify (this is the B3 acceptance criterion that was never actually run):** two-node libp2p devnet, both mining; after several confirmed levels, `chain_getBlockHash(n)` must be **identical on both nodes for every n**. Script it: loop n, diff node1:9944 vs node2:9945. This test currently would fail — it must pass when this item is done.
 
-### - [ ] 2. A-1: sr25519 dev signature out of the production wasm runtime
+### - [x] 2. A-1: sr25519 dev signature out of the production wasm runtime
 
 **Files:** `primitives/falcon/src/lib.rs`, `primitives/falcon/Cargo.toml`, `runtime/Cargo.toml`, `node/Cargo.toml`.
 
@@ -109,11 +136,22 @@ These are one work-stream; do in this sub-order.
 
 ### - [ ] 7. B-6: initial sync / historical backfill for Prism state
 
-**Files:** `client/prism-network`.
+**Files:** `client/prism-network` (`src/lib.rs` for wire types, `src/wire.rs` for the worker).
 
 **Do:** Implement §3.6's strategy: request peers' voter tips + proposer best level, then breadth-first backfill by parent refs. Currently only reactive orphan-fetch exists, so a fresh/long-offline node never converges.
 
-**Verify:** start a node against a peer with existing history and an empty `PrismDb`; it catches up to the peer's DAG.
+**Detailed plan (written 2026-07-07 after reading the current worker; not yet implemented):**
+
+- **Wire: add a status exchange to the sync protocol.** New `SyncRequest::GetStatus` → `SyncResponse::Status { proposer_best_level: u64, voter_tips: Vec<H256>, unreferenced_proposers: Vec<H256>, unreferenced_tx_blocks: Vec<H256> }`. Everything in that response reads straight off `PrismChain`'s already-public fields — **no new DB indices needed**, because after B-7 the serving node's in-memory DAG is complete at all times (this is why B-6 no longer depends on the index-CF work B-7 deferred). SCALE enums decode by variant index, so appending variants keeps old messages decodable by new nodes; an old node receiving `GetStatus` just fails decode and returns `Err` — the requester must tolerate that (fine for a devnet, no version negotiation needed).
+- **Convergence comes for free; round-trip count doesn't.** Fetching only the peer's tip hashes and letting the existing missing-refs machinery chase parents *would* already converge, by the same fixed-point argument B-7 proved for replay (every dependency of an accepted block is itself accepted, hence persisted, hence servable). But the current `fetch` → `process` → `fetch` recursion resolves one hop per round trip and builds a `Box::pin` future stack as deep as the history — O(depth) network round trips and an effectively unbounded recursion for a real chain. So:
+- **Replace recursion with an iterative work-queue for the backfill path.** Keep a `pending: HashSet<H256>` (dedupe) + queue; request in batches (~64 hashes — the response cap is 16 MiB per `sync_protocol_config`, and the server already returns partial results via its `filter_map`, so the requester must re-queue hashes that didn't come back, with a per-hash retry cap / peer rotation so a hash a peer genuinely lacks doesn't spin forever). Insert each returned block through the existing `handle_announcement` path, push its `to_fetch` back onto the queue, loop until empty. One in-flight batch per peer. This also retires the existing unbounded recursion for deep *orphan* chains as a side effect.
+- **Trigger points:** on `NotificationStreamOpened`, send `GetStatus`; start backfill if the peer's `proposer_best_level` exceeds ours or any of its tips is unknown to us. Add a slow periodic re-check (~30s arm in `run`'s `select!`) so a long-offline node also converges without needing a fresh connection event.
+- **Suppress re-gossip for backfilled blocks.** `process` currently floods every accepted block to all peers via `to_gossip`; during a thousands-of-blocks backfill that re-floods history at peers who already have it. Pass a `from_backfill` flag (or a separate process variant) that skips `gossip` but keeps everything else — validation, insertion, `may_confirm` notification — identical.
+- **Bridge interaction is already correct, no changes needed:** a fresh node building its Substrate chain from level 1 as backfill confirms levels is the *intended* behavior (every node derives the Substrate chain locally; B-1 makes the result byte-identical, and warp sync is deliberately off). `PrismLedger::recover(db, client.info().best_number)` starts at 0 on a fresh node, which is right.
+- **B-8 caveat:** backfill uses the same async `network.request` call as orphan-fetch, which litep2p leaves `unimplemented!()` — B-6 inherits the `--network-backend libp2p` requirement until B-8 lands. Same call site; B-8 fixes both at once.
+- **No new trust surface:** every backfilled block still flows through `validate_block` + live-params sortition checks in `handle_announcement`; the only new resource to bound is the pending-queue size (cap it; a malicious `Status` full of garbage hashes costs the requester one wasted batch round per retry cap, nothing more).
+
+**Verify:** start node2 with an empty `PrismDb` (libp2p backend) against a node1 holding a long non-trivial history; node2's `proposer_best_level` converges to node1's, and `chain_getBlockHash(n)` matches node1 for every n (which doubles as B-1's still-outstanding byte-identical live check — do both in one session). Repeat with node2 stopped for a long stretch mid-run and restarted (long-offline case, exercises the periodic re-check).
 
 ### - [x] 8. B-9: root-cause the two-honest-miner confirmation stall
 
@@ -130,10 +168,27 @@ Two tests establish the actual shape of the bug:
 ## Phase 4 — as convenient (no correctness impact)
 
 - [ ] 9. **AF-3:** finer-grained DAG concurrency (per-voter-chain locks or actor model). Only when measured to matter.
-- [ ] 10. **B-5:** per-chain genesis hashes from `(chain_spec_genesis, chain_id)` instead of the shared `H256::zero()` sentinel (`primitives/prism::genesis_hash` already exists, unused).
+- [ ] 10. **B-5:** per-chain genesis hashes from `(chain_spec_genesis, chain_id)` instead of the shared `H256::zero()` sentinel (`primitives/prism::genesis_hash` already exists, unused). **Detailed plan in its own section below** (not to be confused with "B5 pruning" at the bottom of this file — unfortunate near-identical IDs).
 - [ ] 11. **B-8:** port `client/prism-network`'s sync-request from litep2p's `unimplemented!()` async `request` to the callback-based `start_request`, so `--network-backend libp2p` is no longer mandatory.
 - [ ] 12. **B-10:** docker-compose devnet artifact; mirror the default peer set (`add_peers_to_reserved_set`) instead of independent Prism peer slots.
 - [ ] 13. **A-3/A-4:** registry-mode transaction-builder tooling (extend `submit_transfer.rs`); size-assertion test (registry-mode ≤ 850 bytes); optional auto-register-on-first-bootstrap-tx.
+
+### B-5 detailed plan (written 2026-07-07 after reading the current code; not yet implemented)
+
+**What the shared `H256::zero()` sentinel actually costs**, in priority order:
+1. **No network domain separation.** Every Prism DAG on every network roots at zero, so a block mined against network A's genesis is structurally valid ancestry on network B — two devnets whose nodes ever peer can cross-pollinate DAGs. Deriving genesis from the Substrate chain-spec hash makes each network's DAG disjoint; foreign blocks just orphan forever.
+2. **No chain-slot separation at the genesis boundary.** All m voter chains and the proposer tree share one entry in `voter_meta`/`proposer_meta` (`client/prism-chain/src/lib.rs::genesis_sentinel`); a genesis-parented voter block's chain identity rests entirely on its self-declared `BlockContent::Voter { chain }` field.
+
+`primitives/prism::genesis_hash(chain_spec_genesis, slot)` already does the right derivation (blake3 over genesis‖slot), so this is purely plumbing:
+
+- **Slot convention:** voter chain `i` → slot `i` (0..m-1), proposer tree → slot `m`. Tx blocks parent onto proposers in `build_template`, so they need no slot of their own — fix `genesis_hash`'s stale doc comment ("m voter + 1 tx + 1 proposer") to match.
+- **Put `chain_spec_genesis: H256` in `Params`.** Its own doc comment already says "stored in chain spec, never hardcoded," and this is the one place both consumers can reach it: `PrismChain` *and* `PrismMiner::new`, which builds its default template from `Params` alone with no chain handle. `node/src/service.rs` sets it from the client's real genesis (`client.chain_info().genesis_hash`) where `prism_params` is built; tests pass a fixed dummy (e.g. `H256::repeat_byte(0x42)`).
+- **`PrismChain`:** compute `voter_genesis: Vec<H256>` + `proposer_genesis: H256` once in `new()`; seed `voter_meta` with m per-chain entries, `voter_tips[i] = (voter_genesis[i], 0)`, `proposer_meta` with the proposer genesis at level 0. `proposer_level`'s sentinel check compares against `self.proposer_genesis`. Delete `genesis_sentinel()`; expose accessors for the miner's `build_template` fallback.
+- **Check to make while in there:** `voter_meta` is a single map across all chains, so verify (or add) that a voter block claiming chain `i` whose parent is chain `j`'s genesis/tip gets rejected — per-chain geneses make this enforceable at the genesis boundary for the first time; today the shared sentinel makes it undetectable there.
+- **DB compatibility — don't skip this:** existing devnet DBs hold zero-parented blocks; after this change `with_db`'s B-7 replay would orphan the *entire* store and silently boot with an empty DAG. Store `chain_spec_genesis` under a meta key in `PrismDb` and hard-error on mismatch (which also catches pointing one network's node at another network's data dir). Devnet answer to migration: purge and remine — document it, don't build migration.
+- **No wire-format changes:** parents are already plain `H256`s in headers; only the *values* change.
+
+**Verify:** adapt existing fixtures to a nonzero dummy genesis; new tests: foreign-genesis block orphans instead of accepting; B-7's `with_db_recovers_full_dag_state_after_a_restart` still passes with per-chain geneses; wrong-chain genesis parent rejected (the check above). Then the standard live run — fresh DBs on both nodes (genesis-breaking change), two-node mine-and-confirm, plus one restart.
 
 ---
 

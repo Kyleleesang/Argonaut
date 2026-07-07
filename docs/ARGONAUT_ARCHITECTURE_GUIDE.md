@@ -472,6 +472,14 @@ Rules for the implementing model, restate in every prompt: SCALE everywhere; no 
 
 ## 9. Implementation D — Decentralized Storage Platform (Iroh data plane, on-chain control plane)
 
+> **Implementers: read `docs/IMPLEMENTATION_D_SPEC.md` instead.** This section
+> is the product/architecture rationale; the spec expands it into exact storage
+> layouts, extrinsic check-orders, escrow/vesting formulas, epoch/beacon
+> mechanics, and per-milestone tests — and **supersedes this section where they
+> conflict** (deviations listed in its §D.13, notably: the §9.5 beacon is
+> replaced with an epoch-snapshotted block hash because the runtime cannot read
+> the bridge's leader post-digest).
+
 ### 9.0 Feasibility & library inventory (verified June 2026)
 
 | Need | Library | Status / Notes |

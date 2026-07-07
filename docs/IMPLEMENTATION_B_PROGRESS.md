@@ -2,7 +2,7 @@
 
 Tracks status against [`ARGONAUT_ARCHITECTURE_GUIDE.md`](./ARGONAUT_ARCHITECTURE_GUIDE.md) §3 ("Implementation B — Prism Consensus") and its milestones in §3.9. Follows [`IMPLEMENTATION_A_PROGRESS.md`](./IMPLEMENTATION_A_PROGRESS.md) per the doc's §6 build order. Lives on the `Base` branch.
 
-## Status: B0-B4 complete and tested. B5 not started.
+## Status: B0-B4 complete and tested. Fix-plan Phases 1-3 also complete (code + unit tests; live-devnet verification of several items still outstanding — see [`IMPLEMENTATION_AB_FIXPLAN.md`](./IMPLEMENTATION_AB_FIXPLAN.md)'s "Outstanding TODOs"). B5 (pruning) not started; B-5/B-6 (fix-plan Phase 4/3 items, not B5) have detailed plans written but not implemented.
 
 | §3.9 milestone | Status |
 |---|---|
@@ -259,6 +259,15 @@ A separate audit pass (Opus) compared this implementation against the architectu
 - **Explicitly not done, flagged, don't skip:** B-3 (the paper's exact `δ_d` constant, Appendix E.1 -- still a placeholder, deliberately not guessed). Live-devnet verification for every item above (only `cargo test --workspace` has been run this round, per the fix plan's own "verify" steps still being open). Phases 3-4 of the fix plan (B-7, B-6, B-9, and everything lower severity).
 
 See the fix-plan doc for exact file-level detail, including one real bug the test suite caught mid-session: wiring stage-2 into `advance` made an existing adversarial test fail, correctly -- the test asserted a liveness weakness that stage-2 was specifically built to close, so the test needed rewriting to check both "stage-1 alone still has the weakness" and "the system as a whole no longer does," rather than the wiring being wrong.
+
+### Post-B4, continued: Phase 3 of the fix plan (2026-07-07)
+
+All landed, code-complete and unit-tested (see the fix-plan doc's per-item detail, not duplicated here):
+- **B-7 + AF-5** (persist DAG indices / recover on restart): scoped up mid-session after finding a worse bug than planned — restart wasn't just slow, it silently double-confirmed and double-built Substrate blocks for every already-settled level. Fixed via full replay-on-restart (`PrismChain::with_db`) + a real recovered confirmed-cursor (`PrismLedger::recover`). Index-CF population itself remains deferred (now a pure scale concern).
+- **B-9** (two-honest-miner stall): root-caused, not fixed — a deterministic repro (`honest_split_tests.rs`) proves an *exact* even split between two honest miners is structurally unresolvable forever, while any real skew resolves via stage-2. Conclusion: don't run small-`m`, 2-miner devnets expecting fast guaranteed confirmation; not a protocol bug.
+- **B-3's paper formula** (`paper_k_min`/`paper_delta_d`, Appendix E.1 eq. 31): ported faithfully and unit-tested, but deliberately *not* wired in as the operating default — the paper's literal `k_min` is in the thousands for any sane β, which would make stage-2 slower than stage-1, not faster.
+
+**Detailed (not-yet-implemented) plans written into the fix-plan doc this session, ready to execute next:** B-6 (initial sync / historical backfill) and B-5 (per-chain genesis hashes). See [`IMPLEMENTATION_AB_FIXPLAN.md`](./IMPLEMENTATION_AB_FIXPLAN.md)'s "Outstanding TODOs" section for the full, current to-do list (live-verification debt on already-"done" items, plus every fully-open item in priority order) — that section, not this doc, is the one to check for "what's left."
 
 ## Next: B5
 
