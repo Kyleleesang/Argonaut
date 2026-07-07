@@ -373,57 +373,59 @@ fn leader_at_level_tie_breaks_deterministically_by_hash() {
     assert_eq!(chain.leader_at_level(1), Some(expected));
 }
 
-#[test]
-fn confirmed_leader_at_level_none_for_unknown_level() {
-    let chain = PrismChain::new(params());
-    assert_eq!(chain.confirmed_leader_at_level(1, 0), None);
-}
+// AF-2: the stage-1 "conservative k-deep" confirmation *policy* (previously
+// `PrismChain::confirmed_leader_at_level`) moved to `client/prism-ledger`
+// (architecture guide §3.8 assigns confirmation there, not to the DAG state
+// machine) -- see `argonaut_prism_ledger::confirmed_leader_at_level` and its
+// tests. `PrismChain` itself only exposes the raw facts that policy needs
+// (`level_proposer`, `unvoted_levels`, `votes`, `voter_tips`), all already
+// public fields.
 
+/// B-2: `insert_block` must feed the difficulty retarget with each accepted
+/// block's *real* timestamp (not the shared `header()` test helper's fixed
+/// `timestamp_ms: 0`, which every other test in this file relies on to never
+/// trigger a retarget -- see `argonaut_primitives_prism::DifficultyRetarget`'s
+/// own "ignores non-advancing timestamps" test for that half of the
+/// contract). Tx blocks are the simplest path: always accepted immediately,
+/// no votes/deps required.
 #[test]
-fn confirmed_leader_at_level_requires_every_chain_to_vote() {
+fn insert_block_feeds_the_difficulty_retarget_with_real_timestamps() {
     let mut chain = PrismChain::new(params());
     let genesis = genesis_sentinel();
+    let initial_difficulty = chain.params.difficulty;
 
-    let p1 = proposer_block(1, genesis, vec![], vec![]);
-    let p1_hash = block_hash(&p1.header);
-    chain.insert_block(p1);
+    let advancing_header = |nonce: u64, timestamp_ms: u64| SuperHeader {
+        parents_root: H256::zero(),
+        content_root: H256::zero(),
+        timestamp_ms,
+        nonce,
+        difficulty: U256::max_value(),
+    };
+    let advancing_tx_block = |nonce: u64, timestamp_ms: u64| PrismBlock {
+        header: advancing_header(nonce, timestamp_ms),
+        parent: genesis,
+        content: BlockContent::Transaction { txs: vec![vec![nonce as u8]] },
+        parent_proof: MerkleProof::default(),
+        content_proof: MerkleProof::default(),
+    };
 
-    // Only 3 of the 4 chains (params() uses m=4) vote.
-    chain.insert_block(voter_block(101, 0, genesis, vec![p1_hash]));
-    chain.insert_block(voter_block(102, 1, genesis, vec![p1_hash]));
-    chain.insert_block(voter_block(103, 2, genesis, vec![p1_hash]));
-
-    assert_eq!(chain.confirmed_leader_at_level(1, 0), None);
-}
-
-#[test]
-fn confirmed_leader_at_level_becomes_confirmed_once_votes_are_k_deep() {
-    let mut chain = PrismChain::new(params());
-    let genesis = genesis_sentinel();
-
-    let p1 = proposer_block(1, genesis, vec![], vec![]);
-    let p1_hash = block_hash(&p1.header);
-    chain.insert_block(p1);
-
-    let mut nonce = 300u64;
-    for c in 0..4u16 {
-        nonce += 1;
-        chain.insert_block(voter_block(nonce, c, genesis, vec![p1_hash]));
-    }
-    // Every chain has voted (satisfies k=0), but each vote is only depth 1 on
-    // a depth-1 tip -- 0 blocks behind, so not yet 3-deep.
-    assert_eq!(chain.confirmed_leader_at_level(1, 0), Some(p1_hash));
-    assert_eq!(chain.confirmed_leader_at_level(1, 3), None);
-
-    // Extend every chain 3 further (voteless) blocks, so the original vote is
-    // now exactly 3 blocks behind each chain's tip.
-    for _ in 0..3 {
-        for c in 0..4u16 {
-            let tip = chain.voter_tips[c as usize].0;
-            nonce += 1;
-            chain.insert_block(voter_block(nonce, c, tip, vec![]));
-        }
+    // Blocks arriving much faster than the (default 1000ms) target interval
+    // should make mining *harder* -- i.e. shrink the `difficulty` threshold
+    // value (a block is valid when `hash <= difficulty`, so a smaller value
+    // is a smaller, harder-to-hit acceptance range) -- once the retarget
+    // window fills (`RETARGET_WINDOW + 1` samples needed for the first
+    // result).
+    for i in 0..=argonaut_primitives_prism::RETARGET_WINDOW {
+        chain.insert_block(advancing_tx_block(i, i * 10));
     }
 
-    assert_eq!(chain.confirmed_leader_at_level(1, 3), Some(p1_hash));
+    assert!(
+        chain.params.difficulty < initial_difficulty,
+        "difficulty threshold should have shrunk (harder) in response to fast block arrivals"
+    );
+    // The equal m+2-way split invariant must survive the retarget.
+    let total_slots = U256::from(chain.params.m_voter_chains + 2);
+    assert_eq!(chain.params.f_v, chain.params.difficulty / total_slots);
+    assert_eq!(chain.params.f_v, chain.params.f_t);
+    assert_eq!(chain.params.f_v, chain.params.f_p);
 }

@@ -12,7 +12,7 @@ name = "argonaut-node"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
-tokio = { version = "1", features = ["time"] }
+tokio = { version = "1", features = ["time", "sync"] }
 
 sc-cli              = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412" }
 sc-block-builder    = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412" }
@@ -51,8 +51,8 @@ frame-system        = { git = "https://github.com/paritytech/polkadot-sdk", bran
 frame-benchmarking      = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412" }
 frame-benchmarking-cli  = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412" }
 
-argonaut-runtime = { version = "0.1.0", path = "../runtime" }
-argonaut-primitives-falcon = { path = "../primitives/falcon" }
+argonaut-runtime = { version = "0.1.0", path = "../runtime", features = ["dev-signatures"] }
+argonaut-primitives-falcon = { path = "../primitives/falcon", features = ["dev-signatures"] }
 argonaut-primitives-prism = { path = "../primitives/prism" }
 argonaut-prism-chain = { path = "../client/prism-chain" }
 argonaut-prism-db = { path = "../client/prism-db" }

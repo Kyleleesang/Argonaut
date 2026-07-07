@@ -191,7 +191,10 @@ pub fn try_mine(
 }
 
 pub struct PrismMiner {
-    pub params: Arc<Params>,
+    /// B-2: swappable, not a frozen `Arc<Params>` -- see `refresh`'s doc
+    /// comment for why a retargeted `Params` has to reach this, not just the
+    /// template's `difficulty` field.
+    params: Arc<ArcSwap<Params>>,
     template: Arc<ArcSwap<MinerTemplate>>,
 }
 
@@ -215,13 +218,27 @@ impl PrismMiner {
             difficulty: params.difficulty,
         };
         PrismMiner {
-            params: Arc::new(params),
+            params: Arc::new(ArcSwap::from(Arc::new(params))),
             template: Arc::new(ArcSwap::from(Arc::new(default_tmpl))),
         }
     }
 
-    /// Swap in a new mining template (wait-free from mining threads).
-    pub fn refresh(&self, template: MinerTemplate) {
+    /// Swap in a new mining template *and* the `Params` it was built
+    /// against (wait-free from mining threads). Both together, not just the
+    /// template: `try_mine`'s actual accept/reject decision is
+    /// `sortition(hash, params) != Fail` -- the template's own `difficulty`
+    /// field is only ever stamped into the mined header for *other* nodes'
+    /// later `validate_block` check, never consulted by the miner itself.
+    /// Before B-2 this didn't matter (`params` never changed after
+    /// construction); now that `client/prism-chain`'s `DifficultyRetarget`
+    /// can change it over time, passing a live `Params` into
+    /// `build_template` alone -- without also updating what the miner's own
+    /// `try_mine` gates against -- would let `header.difficulty` (from the
+    /// new target) silently disagree with the threshold actually used to
+    /// accept the block (the stale one), which a validating peer's `hash <=
+    /// header.difficulty` check could then incorrectly reject or accept.
+    pub fn refresh(&self, template: MinerTemplate, params: Params) {
+        self.params.store(Arc::new(params));
         self.template.store(Arc::new(template));
     }
 
@@ -235,7 +252,8 @@ impl PrismMiner {
             let mut nonce: u64 = thread_id;
             loop {
                 let tmpl = self.template.load();
-                let (found, next_nonce) = try_mine(&tmpl, &self.params, nonce, 100_000);
+                let params = self.params.load();
+                let (found, next_nonce) = try_mine(&tmpl, &params, nonce, 100_000);
                 nonce = next_nonce;
                 if let Some(block) = found {
                     on_found(block);

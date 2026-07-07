@@ -41,6 +41,11 @@ pub struct ReceiveOutcome {
     pub to_gossip: Vec<PrismBlock>,
     /// Hashes to request from the announcing peer (missing refs).
     pub to_fetch: Vec<H256>,
+    /// AF-1: threaded straight from `InsertOutcome::may_confirm` -- true if
+    /// this block's acceptance might have advanced confirmation for some
+    /// level, so the caller should wake the bridge rather than let it wait
+    /// out its poll interval.
+    pub may_confirm: bool,
 }
 
 /// Process an incoming PrismBlock announcement.
@@ -55,24 +60,25 @@ pub fn handle_announcement(
         BlockAnnouncement::Full(b) => b,
         BlockAnnouncement::Hash(_) => {
             // Hash-only: caller should issue a sync request; nothing to do here.
-            return ReceiveOutcome { to_gossip: vec![], to_fetch: vec![] };
+            return ReceiveOutcome { to_gossip: vec![], to_fetch: vec![], may_confirm: false };
         }
     };
 
     let hash = argonaut_primitives_prism::block_hash(&block.header);
     if seen.contains(&hash) {
-        return ReceiveOutcome { to_gossip: vec![], to_fetch: vec![] };
+        return ReceiveOutcome { to_gossip: vec![], to_fetch: vec![], may_confirm: false };
     }
     seen.insert(hash);
 
     if validate_block(&block, params).is_err() {
-        return ReceiveOutcome { to_gossip: vec![], to_fetch: vec![] };
+        return ReceiveOutcome { to_gossip: vec![], to_fetch: vec![], may_confirm: false };
     }
 
     let outcome = chain.insert_block(block.clone());
     ReceiveOutcome {
         to_gossip: vec![block],
         to_fetch: outcome.missing,
+        may_confirm: outcome.may_confirm,
     }
 }
 

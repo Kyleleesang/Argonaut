@@ -104,3 +104,14 @@ try-runtime = [
     "pallet-timestamp/try-runtime",
     "pallet-transaction-payment/try-runtime",
 ]
+# Dev-only sr25519 signature support (see `ArgonautSignature::Sr25519`'s doc
+# comment). Deliberately NOT part of `std`/`default`/anything the wasm build
+# enables: `runtime/build.rs`'s `WasmBuilder` runs the wasm target as an
+# isolated `--no-default-features` cargo invocation with no explicit feature
+# forwarding, so this feature never reaches the wasm blob unless a future
+# change to `build.rs` explicitly threads it through -- don't do that; a
+# production runtime should not accept non-post-quantum signatures. Native
+# crates that need dev accounts (`node`, its chain specs, benchmarking, CLI
+# tooling) enable this directly against their own native compilation of this
+# crate, which never touches the wasm build.
+dev-signatures = ["argonaut-primitives-falcon/dev-signatures"]

@@ -13,7 +13,7 @@
 //! network backend (`NetworkWorker`/libp2p or `Litep2pNetworkBackend`) the node
 //! is started with.
 use crate::{handle_announcement, BlockAnnouncement, SyncRequest, SyncResponse};
-use argonaut_primitives_prism::{block_hash, Params, H256};
+use argonaut_primitives_prism::{block_hash, H256};
 use argonaut_prism_chain::PrismChain;
 use argonaut_prism_db::PrismDb;
 use parity_scale_codec::{Decode, Encode};
@@ -95,7 +95,11 @@ pub struct PrismNetworkWorker {
     network: Arc<dyn NetworkServiceTrait>,
     chain: Arc<Mutex<PrismChain>>,
     db: Arc<PrismDb>,
-    params: Params,
+    /// AF-1: signaled whenever an accepted block's `may_confirm` comes back
+    /// true, so `node/src/bridge.rs`'s bridge task can wake immediately
+    /// instead of waiting out a fixed poll interval. Shared with (constructed
+    /// by) the caller, which also hands the same `Arc` to the bridge.
+    confirmation_notify: Arc<tokio::sync::Notify>,
     seen: HashSet<H256>,
     peers: HashSet<PeerId>,
 }
@@ -107,7 +111,7 @@ impl PrismNetworkWorker {
         network: Arc<dyn NetworkServiceTrait>,
         chain: Arc<Mutex<PrismChain>>,
         db: Arc<PrismDb>,
-        params: Params,
+        confirmation_notify: Arc<tokio::sync::Notify>,
     ) -> (Self, futures::channel::mpsc::UnboundedSender<argonaut_primitives_prism::PrismBlock>) {
         let (mined_tx, mined_blocks) = futures::channel::mpsc::unbounded();
         (
@@ -118,7 +122,7 @@ impl PrismNetworkWorker {
                 network,
                 chain,
                 db,
-                params,
+                confirmation_notify,
                 seen: HashSet::new(),
                 peers: HashSet::new(),
             },
@@ -164,8 +168,22 @@ impl PrismNetworkWorker {
     async fn process(&mut self, announcement: BlockAnnouncement, source: Option<PeerId>) {
         let outcome = {
             let mut chain = self.chain.lock().expect("PrismChain mutex poisoned");
-            handle_announcement(announcement, &self.params, &mut self.seen, &mut chain)
+            // B-2: read the *live* (possibly retargeted) params straight off
+            // `chain` rather than this worker's own frozen copy -- otherwise,
+            // once `DifficultyRetarget` moves `f_v`/`f_t`/`f_p`, this
+            // validation path would keep checking incoming blocks' sortition
+            // consistency against stale thresholds, either rejecting validly
+            // mined blocks or misclassifying their content type.
+            let params = chain.params.clone();
+            handle_announcement(announcement, &params, &mut self.seen, &mut chain)
         };
+        if outcome.may_confirm {
+            // AF-1: wake the bridge immediately rather than making it wait
+            // out its own poll interval -- `notify_one` stores a permit if
+            // nothing is waiting yet, so this is safe regardless of which
+            // task reaches its side of the handshake first.
+            self.confirmation_notify.notify_one();
+        }
         for block in &outcome.to_gossip {
             log::info!(
                 target: "prism",

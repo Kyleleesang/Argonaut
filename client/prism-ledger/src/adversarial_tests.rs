@@ -124,7 +124,7 @@ fn balancing_attack_with_zero_confirmation_depth_can_trick_the_ledger() {
 
     // The attacker's chain 0 momentarily also votes p1 -- unanimous for one instant.
     attacker_fork(&mut chain, 0, 1, vec![p1_hash], &mut nonce);
-    assert_eq!(chain.confirmed_leader_at_level(1, 0), Some(p1_hash));
+    assert_eq!(confirmed_leader_at_level(&chain, 1, 0), Some(p1_hash));
 
     let mut ledger = PrismLedger::new(db);
     let confirmed = ledger.advance(&chain, 0);
@@ -137,7 +137,7 @@ fn balancing_attack_with_zero_confirmation_depth_can_trick_the_ledger() {
     // (empty) transaction set moments earlier, based on a snapshot of
     // agreement that no longer holds.
     attacker_fork(&mut chain, 0, 2, vec![p2_hash], &mut nonce);
-    assert_eq!(chain.confirmed_leader_at_level(1, 0), None); // p1 no longer unanimous
+    assert_eq!(confirmed_leader_at_level(&chain, 1, 0), None); // p1 no longer unanimous
     assert_eq!(chain.votes.get(&p1_hash).map(|v| v.total()), Some(3)); // chains 1-3 only, now
     assert_eq!(chain.votes.get(&p2_hash).map(|v| v.total()), Some(1)); // chain 0 alone
     // The ledger has no way to undo what it already committed: `advance`
@@ -204,18 +204,26 @@ fn adequate_confirmation_depth_survives_the_same_balancing_attack() {
 }
 
 #[test]
-fn persistent_balancing_attacker_can_stall_confirmation_indefinitely() {
-    // Documents a real liveness weakness of stage-1 (conservative k-deep):
-    // an attacker who controls even a single voter chain can keep one level
-    // permanently unconfirmed simply by never letting that chain agree with
-    // the rest -- unanimity is all-or-nothing, so depth on the *dissenting*
-    // vote doesn't help: chain 0's vote for p2 can be extended arbitrarily
-    // deep and p1 still never reaches k-deep unanimity, because p1's vote
-    // set can never include a chain that's voting p2. This is precisely the
-    // gap stage-2's confidence-interval list confirmation
-    // (client/prism-ledger/src/confirmation.rs) exists to narrow: it can
-    // confirm a *list* (or, per the architecture guide's strengthening, a
-    // unique leader) without needing every chain to agree.
+fn persistent_balancing_attacker_stalls_stage1_alone_but_not_the_system() {
+    // Documents a real liveness weakness of stage-1 (conservative k-deep) in
+    // isolation: an attacker who controls even a single voter chain can keep
+    // one level permanently unconfirmed *by stage-1's own rule* simply by
+    // never letting that chain agree with the rest -- unanimity is
+    // all-or-nothing, so depth on the *dissenting* vote doesn't help: chain
+    // 0's vote for p2 can be extended arbitrarily deep and p1 never reaches
+    // stage-1's k-deep unanimity, because p1's vote set can never include a
+    // chain that's voting p2.
+    //
+    // This is exactly the gap stage-2 (confidence-interval confirmation,
+    // `client/prism-ledger/src/confirmation.rs`) exists to close, and since
+    // B-4 wired stage-2 into `PrismLedger::advance` (it tries
+    // `confirm_unique_leader` before falling back to stage-1), the *system*
+    // no longer has this weakness: once the honest chains' votes for p1 are
+    // deep enough relative to the single shallow dissenting vote for p2,
+    // stage-2 confirms p1 uniquely despite non-unanimous stage-1 agreement.
+    // Both halves of this claim are checked explicitly below, against the
+    // *same* attack sequence -- stage-1 in isolation stays stuck forever;
+    // `advance()` (stage-1 *and* stage-2 together) does not.
     let (_dir, mut chain, db) = setup(4);
     let genesis = genesis_sentinel();
     let mut nonce = 1000u64;
@@ -231,8 +239,10 @@ fn persistent_balancing_attacker_can_stall_confirmation_indefinitely() {
     for c in 1..4u16 {
         nonce += 1;
         chain.insert_block(voter_block(nonce, c, genesis, vec![p1_hash]));
-        // Give the honest chains plenty of depth -- irrelevant, since chain
-        // 0 alone can block unanimity regardless of how deep the others are.
+        // Give the honest chains plenty of depth -- irrelevant to stage-1
+        // (chain 0 alone can block its unanimity regardless of how deep the
+        // others are), but exactly what lets stage-2 tell p1's overwhelming,
+        // deeply-rooted support apart from chain 0's shallow, isolated one.
         for _ in 0..(K + 5) {
             let tip = chain.voter_tips[c as usize].0;
             nonce += 1;
@@ -251,19 +261,37 @@ fn persistent_balancing_attacker_can_stall_confirmation_indefinitely() {
     // block instead (depth 2 > the depth-1 tip it replaces), and simply
     // keeps extending that same fork from then on -- no more reorgs needed.
     attacker_fork(&mut chain, 0, 2, vec![p2_hash], &mut nonce);
+
+    let mut system_confirmed = false;
     for round in 0..20u64 {
         let tip = chain.voter_tips[0].0;
         nonce += 1;
         chain.insert_block(voter_block(nonce, 0, tip, vec![]));
+
+        // Stage-1 in isolation: must NEVER confirm anything at level 1,
+        // however deep chain 0's dissenting vote gets -- this is the
+        // liveness weakness itself, unaffected by stage-2 existing.
         assert_eq!(
-            ledger.advance(&chain, K),
-            vec![],
-            "round {round}: chain 0's dissenting vote is now {round} blocks deep, but p1 still can't reach unanimity"
+            confirmed_leader_at_level(&chain, 1, K),
+            None,
+            "round {round}: stage-1 alone must never confirm while chain 0 dissents, no matter its depth"
         );
+
+        // The system as a whole (stage-2 first, stage-1 fallback): should
+        // confirm p1 once the honest chains' depth advantage is enough for
+        // stage-2's confidence interval to declare it the unique leader.
+        let confirmed = ledger.advance(&chain, K);
+        if !confirmed.is_empty() {
+            assert_eq!(confirmed.len(), 1);
+            assert_eq!(confirmed[0].leader, p1_hash);
+            system_confirmed = true;
+            break;
+        }
     }
-    // The level remains open indefinitely as long as chain 0 keeps
-    // dissenting -- not a crash or wrong answer, just perpetually "not yet".
-    assert_eq!(ledger.confirmed_tip(), 0);
+    assert!(
+        system_confirmed,
+        "stage-2 should have confirmed p1 as the unique leader well within 20 rounds"
+    );
 }
 
 #[test]

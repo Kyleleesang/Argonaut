@@ -10,7 +10,7 @@ parity-scale-codec = { workspace = true, features = ["std"] }
 rocksdb = { workspace = true }
 argonaut-primitives-prism = { path = "../../primitives/prism" }
 thiserror = { workspace = true }
+sp-core = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
 tempfile = "3"
-sp-core = { workspace = true, features = ["std"] }

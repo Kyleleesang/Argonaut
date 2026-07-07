@@ -2,6 +2,7 @@ use crate::columns::*;
 use argonaut_primitives_prism::{block_hash, PrismBlock, H256};
 use parity_scale_codec::{Decode, Encode};
 use rocksdb::{ColumnFamilyDescriptor, Options, WriteBatch, DB};
+use sp_core::U256;
 use std::path::Path;
 
 #[derive(Debug, thiserror::Error)]
@@ -95,6 +96,24 @@ impl PrismDb {
             Some(bytes) if bytes.len() == 8 => {
                 Ok(Some(u64::from_le_bytes(bytes[..8].try_into().unwrap())))
             }
+            _ => Err(DbError::Codec),
+        }
+    }
+
+    /// `U256` is exactly 32 bytes, same as `H256` -- stored big-endian,
+    /// matching how `sortition`/`block_hash` already interpret hash bytes as
+    /// big-endian `U256` elsewhere in this codebase.
+    pub fn put_u256(&self, cf_name: &str, key: &[u8], val: &U256) -> Result<(), DbError> {
+        let cf = self.db.cf_handle(cf_name).unwrap_or_else(|| panic!("{cf_name} CF missing"));
+        self.db.put_cf(cf, key, val.to_big_endian())?;
+        Ok(())
+    }
+
+    pub fn get_u256(&self, cf_name: &str, key: &[u8]) -> Result<Option<U256>, DbError> {
+        let cf = self.db.cf_handle(cf_name).unwrap_or_else(|| panic!("{cf_name} CF missing"));
+        match self.db.get_cf(cf, key)? {
+            None => Ok(None),
+            Some(bytes) if bytes.len() == 32 => Ok(Some(U256::from_big_endian(&bytes))),
             _ => Err(DbError::Codec),
         }
     }

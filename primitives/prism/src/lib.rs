@@ -9,6 +9,7 @@
 
 extern crate alloc;
 
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use parity_scale_codec::{Decode, Encode};
 use scale_info::TypeInfo;
@@ -32,6 +33,18 @@ pub struct Params {
     pub f_t: U256,
     /// Difficulty fraction for proposer blocks.
     pub f_p: U256,
+    /// Target combined interval (any of the m+2 slots) between two Prism
+    /// blocks, in milliseconds -- what [`DifficultyRetarget`] retargets
+    /// `difficulty`/`f_v`/`f_t`/`f_p` toward as it observes the network's
+    /// actual mining rate (architecture guide §3.5: "retarget like Bitcoin
+    /// ... one shared retarget"). This value itself is a policy choice
+    /// (roughly the guide's "round/delay target D ~= 1s"), not derived from
+    /// the paper's §4.2 physical-parameter formula -- that formula needs
+    /// real bandwidth-delay-product and block-size measurements this
+    /// project doesn't have. `difficulty` above is only ever the *initial*
+    /// guess retargeting starts correcting from, same as Bitcoin's genesis
+    /// difficulty.
+    pub target_interval_ms: u64,
 }
 
 impl Params {
@@ -44,7 +57,102 @@ impl Params {
         let f_v = difficulty / total_slots;
         let f_t = f_v;
         let f_p = f_v;
-        Params { m_voter_chains: m, difficulty, f_v, f_t, f_p }
+        Params { m_voter_chains: m, difficulty, f_v, f_t, f_p, target_interval_ms: 1_000 }
+    }
+
+    /// Recompute `difficulty`/`f_v`/`f_t`/`f_p` for a new *combined* target,
+    /// keeping the m+2-way equal split invariant `testnet()` establishes.
+    /// This is the one and only place that should ever change `difficulty`
+    /// after construction -- doing it here (rather than assigning `difficulty`
+    /// directly at call sites) is what prevents reintroducing the m/f_v
+    /// mismatch bug found earlier this session (a client-side tuning attempt
+    /// that changed `m_voter_chains` without rederiving `f_v`/`f_t`/`f_p` from
+    /// it, silently shrinking the real mining success range by ~14x).
+    pub fn set_combined_target(&mut self, new_target: U256) {
+        let total_slots = U256::from(self.m_voter_chains + 2);
+        let per_slot = new_target / total_slots;
+        self.difficulty = new_target;
+        self.f_v = per_slot;
+        self.f_t = per_slot;
+        self.f_p = per_slot;
+    }
+}
+
+// ── Difficulty retargeting (B-2) ──────────────────────────────────────────────
+
+/// Number of superblocks (any of the m+2 slots) averaged per retarget
+/// decision. Bitcoin uses 2016; this is far smaller because Prism blocks are
+/// found far more often (fine-grained per-slot mining, not one block per ~10
+/// minutes) -- a smaller window keeps retargeting responsive without
+/// needing to wait an impractically long time to react to a real hash-rate
+/// change.
+pub const RETARGET_WINDOW: u64 = 20;
+
+/// Tracks a rolling window of block timestamps and proposes a new combined
+/// difficulty target once per `RETARGET_WINDOW` blocks -- the client-side
+/// analog of Bitcoin's rolling-window retarget (architecture guide §3.5).
+/// Deliberately simple: no persistence of the window itself (only the
+/// resulting target is persisted, by the caller -- see
+/// `client/prism-chain`), so a restart loses at most one window's worth of
+/// smoothing, not correctness.
+#[derive(Clone, Debug, Default)]
+pub struct DifficultyRetarget {
+    timestamps: VecDeque<u64>,
+}
+
+impl DifficultyRetarget {
+    pub fn new() -> Self {
+        Self { timestamps: VecDeque::with_capacity(RETARGET_WINDOW as usize + 1) }
+    }
+
+    /// Feed a newly-accepted block's timestamp (any content type -- the
+    /// *combined* mining rate across all m+2 slots is what `difficulty`
+    /// gates; sortition only splits an already-successful hash afterward).
+    /// Returns the new combined target once every `RETARGET_WINDOW` blocks;
+    /// `None` otherwise (not enough samples yet, or no time signal to act
+    /// on -- see below).
+    pub fn observe(
+        &mut self,
+        timestamp_ms: u64,
+        target_interval_ms: u64,
+        current_target: U256,
+    ) -> Option<U256> {
+        self.timestamps.push_back(timestamp_ms);
+        if self.timestamps.len() as u64 <= RETARGET_WINDOW {
+            return None;
+        }
+        let oldest = *self.timestamps.front().expect("just checked len > 0");
+        let newest = *self.timestamps.back().expect("just checked len > 0");
+        self.timestamps.pop_front();
+
+        if newest <= oldest {
+            // No usable time signal -- e.g. synthetic/scripted blocks that
+            // don't set real timestamps (as in prism-chain's own unit
+            // tests), or (live) a run of blocks sharing a timestamp at
+            // millisecond granularity. Leave the target unchanged rather
+            // than dividing by a ~0 elapsed time and producing a spurious
+            // spike.
+            return None;
+        }
+
+        let actual_elapsed = newest - oldest;
+        let expected_elapsed = target_interval_ms.saturating_mul(RETARGET_WINDOW).max(1);
+
+        // Clamp the *ratio* to [1/4, 4] (Bitcoin-style) by clamping the
+        // elapsed time fed into it, so one adjustment can't swing difficulty
+        // by more than 4x in either direction -- resists a single
+        // fast-forking miner's manipulated timestamps from causing a wild
+        // difficulty swing.
+        let clamped_actual =
+            actual_elapsed.max(expected_elapsed / 4).min(expected_elapsed.saturating_mul(4));
+
+        let new_target = current_target
+            .saturating_mul(U256::from(clamped_actual))
+            .checked_div(U256::from(expected_elapsed))
+            .unwrap_or(current_target)
+            .max(U256::one()); // never let the target collapse to 0 (impossible to mine)
+
+        Some(new_target)
     }
 }
 
@@ -350,5 +458,85 @@ mod tests {
             difficulty: U256::from(100u32),
         };
         assert_eq!(block_hash(&h), block_hash(&h));
+    }
+
+    #[test]
+    fn set_combined_target_preserves_equal_split() {
+        let mut p = Params::testnet();
+        let new_target = U256::from(700u32);
+        p.set_combined_target(new_target);
+        assert_eq!(p.difficulty, new_target);
+        assert_eq!(p.f_v, U256::from(700u32 / (100 + 2)));
+        assert_eq!(p.f_v, p.f_t);
+        assert_eq!(p.f_v, p.f_p);
+    }
+
+    #[test]
+    fn retarget_returns_none_before_the_window_fills() {
+        let mut r = DifficultyRetarget::new();
+        for i in 0..RETARGET_WINDOW {
+            assert_eq!(r.observe(1000 * i, 1000, U256::from(1000u32)), None);
+        }
+    }
+
+    #[test]
+    fn retarget_holds_steady_when_actual_matches_expected() {
+        let mut r = DifficultyRetarget::new();
+        let target = U256::from(1_000_000u32);
+        let mut result = None;
+        for i in 0..=RETARGET_WINDOW {
+            // Exactly on-target: one block every 1000ms.
+            result = r.observe(1000 * i, 1000, target);
+        }
+        assert_eq!(result, Some(target));
+    }
+
+    #[test]
+    fn retarget_shrinks_target_when_blocks_come_too_fast() {
+        let mut r = DifficultyRetarget::new();
+        let target = U256::from(1_000_000u32);
+        let mut result = None;
+        for i in 0..=RETARGET_WINDOW {
+            // Blocks arriving twice as fast as the 1000ms target.
+            result = r.observe(500 * i, 1000, target);
+        }
+        // Too-fast blocks -> tighten the target (smaller = harder to hit).
+        assert!(result.unwrap() < target);
+    }
+
+    #[test]
+    fn retarget_grows_target_when_blocks_come_too_slow() {
+        let mut r = DifficultyRetarget::new();
+        let target = U256::from(1_000_000u32);
+        let mut result = None;
+        for i in 0..=RETARGET_WINDOW {
+            // Blocks arriving twice as slowly as the 1000ms target.
+            result = r.observe(2000 * i, 1000, target);
+        }
+        assert!(result.unwrap() > target);
+    }
+
+    #[test]
+    fn retarget_clamps_extreme_ratios_to_4x() {
+        let mut r = DifficultyRetarget::new();
+        let target = U256::from(1_000_000u32);
+        let mut result = None;
+        for i in 0..=RETARGET_WINDOW {
+            // Blocks arriving 100x slower than target -- would imply a 100x
+            // easier target uncapped; must clamp to exactly 4x.
+            result = r.observe(100_000 * i, 1000, target);
+        }
+        assert_eq!(result.unwrap(), target * 4);
+    }
+
+    #[test]
+    fn retarget_ignores_non_advancing_timestamps() {
+        // Matches this crate's own test convention elsewhere (SuperHeader
+        // built with a fixed timestamp) -- must never fire on these.
+        let mut r = DifficultyRetarget::new();
+        let target = U256::from(1_000_000u32);
+        for _ in 0..(RETARGET_WINDOW * 3) {
+            assert_eq!(r.observe(0, 1000, target), None);
+        }
     }
 }

@@ -17,6 +17,10 @@ pub const GRAPH_TRANSACTION_REF_NEIGHBOR: &str = "GRAPH_TRANSACTION_REF_NEIGHBOR
 pub const GRAPH_PROPOSER_REF_NEIGHBOR: &str = "GRAPH_PROPOSER_REF_NEIGHBOR";
 pub const BLOCKS: &str = "BLOCKS";
 pub const BLOCK_STATUS: &str = "BLOCK_STATUS";
+/// Current combined difficulty target (B-2: client-side rolling-window
+/// retarget), so it survives a node restart instead of resetting to
+/// `Params::testnet()`'s initial guess every time.
+pub const CURRENT_DIFFICULTY_TARGET: &str = "CURRENT_DIFFICULTY_TARGET";
 
 pub const ALL_COLUMNS: &[&str] = &[
     PROPOSER_NODE_LEVEL,
@@ -36,4 +40,5 @@ pub const ALL_COLUMNS: &[&str] = &[
     GRAPH_PROPOSER_REF_NEIGHBOR,
     BLOCKS,
     BLOCK_STATUS,
+    CURRENT_DIFFICULTY_TARGET,
 ];

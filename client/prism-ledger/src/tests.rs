@@ -65,6 +65,26 @@ fn vote_from_every_chain(chain: &mut PrismChain, nonce_start: u64, proposer_hash
 }
 
 #[test]
+fn advance_reports_the_leader_blocks_own_timestamp() {
+    // ConfirmedLevel.timestamp_ms must come from the leader PrismBlock's own
+    // header (deterministic across nodes), not local wall-clock time -- see
+    // node/src/bridge.rs, which was found live to use SystemTime::now() and
+    // so produced different block hashes on different honest nodes.
+    let (_dir, mut chain, db) = setup();
+    let genesis = genesis_sentinel();
+    let mut p1 = proposer_block(1, genesis, vec![], vec![]);
+    p1.header.timestamp_ms = 424_242;
+    let p1_hash = block_hash(&p1.header);
+    chain.insert_block(p1);
+    vote_from_every_chain(&mut chain, 100, p1_hash);
+
+    let mut ledger = PrismLedger::new(db);
+    let confirmed = ledger.advance(&chain, 0);
+    assert_eq!(confirmed.len(), 1);
+    assert_eq!(confirmed[0].timestamp_ms, 424_242);
+}
+
+#[test]
 fn advance_returns_nothing_before_any_level_is_confirmed() {
     let (_dir, chain, db) = setup();
     let mut ledger = PrismLedger::new(db);
@@ -206,4 +226,62 @@ fn advance_respects_k_deep_and_confirms_once_votes_are_deep_enough() {
     let confirmed = ledger.advance(&chain, 3);
     assert_eq!(confirmed.len(), 1);
     assert_eq!(confirmed[0].leader, p1_hash);
+}
+
+// AF-2: migrated from `client/prism-chain/src/tests.rs` alongside moving
+// `confirmed_leader_at_level` itself into this crate.
+
+#[test]
+fn confirmed_leader_at_level_none_for_unknown_level() {
+    let (_dir, chain, _db) = setup();
+    assert_eq!(confirmed_leader_at_level(&chain, 1, 0), None);
+}
+
+#[test]
+fn confirmed_leader_at_level_requires_every_chain_to_vote() {
+    let (_dir, mut chain, _db) = setup();
+    let genesis = genesis_sentinel();
+
+    let p1 = proposer_block(1, genesis, vec![], vec![]);
+    let p1_hash = block_hash(&p1.header);
+    chain.insert_block(p1);
+
+    // Only 3 of the 4 chains (params() uses m=4) vote.
+    chain.insert_block(voter_block(101, 0, genesis, vec![p1_hash]));
+    chain.insert_block(voter_block(102, 1, genesis, vec![p1_hash]));
+    chain.insert_block(voter_block(103, 2, genesis, vec![p1_hash]));
+
+    assert_eq!(confirmed_leader_at_level(&chain, 1, 0), None);
+}
+
+#[test]
+fn confirmed_leader_at_level_becomes_confirmed_once_votes_are_k_deep() {
+    let (_dir, mut chain, _db) = setup();
+    let genesis = genesis_sentinel();
+
+    let p1 = proposer_block(1, genesis, vec![], vec![]);
+    let p1_hash = block_hash(&p1.header);
+    chain.insert_block(p1);
+
+    let mut nonce = 300u64;
+    for c in 0..4u16 {
+        nonce += 1;
+        chain.insert_block(voter_block(nonce, c, genesis, vec![p1_hash]));
+    }
+    // Every chain has voted (satisfies k=0), but each vote is only depth 1 on
+    // a depth-1 tip -- 0 blocks behind, so not yet 3-deep.
+    assert_eq!(confirmed_leader_at_level(&chain, 1, 0), Some(p1_hash));
+    assert_eq!(confirmed_leader_at_level(&chain, 1, 3), None);
+
+    // Extend every chain 3 further (voteless) blocks, so the original vote is
+    // now exactly 3 blocks behind each chain's tip.
+    for _ in 0..3 {
+        for c in 0..4u16 {
+            let tip = chain.voter_tips[c as usize].0;
+            nonce += 1;
+            chain.insert_block(voter_block(nonce, c, tip, vec![]));
+        }
+    }
+
+    assert_eq!(confirmed_leader_at_level(&chain, 1, 3), Some(p1_hash));
 }

@@ -42,29 +42,46 @@ pub enum ArgonautSignature {
     Falcon { sig: FalconSignature },
 
     /// Dev-only escape hatch (sr25519 bootstrap signing, e.g. `//Alice`-style dev
-    /// accounts). Deliberately *not* `#[cfg(feature = "std")]`-gated: `Verify` for
-    /// `sr25519::Signature` (`sp_runtime::traits`) dispatches to the `sp_io::crypto`
-    /// host function and works fine in wasm, same as any other Substrate chain's
-    /// sr25519 accounts. Gating this variant out of the wasm build while native
-    /// tooling (this crate's own `std`-only callers) kept emitting it created a
-    /// SCALE wire-format mismatch: the two builds disagreed on this enum's variant
-    /// count, so the wasm runtime couldn't even decode an extrinsic signed this way
+    /// accounts). Gated on the dedicated `dev-signatures` feature -- *not*
+    /// `#[cfg(feature = "std")]`, which is what caused a real, live bug: `Verify`
+    /// for `sr25519::Signature` (`sp_runtime::traits`) dispatches to the
+    /// `sp_io::crypto` host function and works fine in wasm, same as any other
+    /// Substrate chain's sr25519 accounts, so there was never a technical need to
+    /// gate this out of wasm specifically. But gating it on `std` did exactly
+    /// that (wasm is built `no_std`) while every *native* caller (chain specs,
+    /// benchmarking, CLI tooling -- all built with `std`) kept emitting it,
+    /// silently disagreeing with the wasm runtime about this enum's variant
+    /// count. Every sr25519-signed extrinsic became SCALE-undecodable on-chain
     /// -- found live, via `TaggedTransactionQueue_validate_transaction` trapping
     /// with `wasm unreachable` on a perfectly well-formed signed extrinsic.
+    ///
+    /// `dev-signatures` fixes both problems at once: it's a single feature
+    /// applied identically wherever this crate is compiled (so wasm and native
+    /// never disagree on the enum shape), and it's off by default so a
+    /// production wasm runtime doesn't accept this non-post-quantum signature
+    /// scheme at all unless a caller deliberately opts in (see
+    /// `primitives/falcon/Cargo.toml` and `runtime/Cargo.toml` for how the
+    /// feature is (deliberately not) threaded into the wasm build).
+    #[cfg(feature = "dev-signatures")]
     Sr25519(sp_core::sr25519::Signature),
 }
 
 /// Signer counterpart to [`ArgonautSignature`], used only to derive an `AccountId`.
+/// Also gated on `dev-signatures`: it never itself crosses the wasm boundary
+/// (`AccountId` resolves to the plain `AccountId32` associated type, not this
+/// enum), so this gate has no wire-format-mismatch risk the way
+/// `ArgonautSignature::Sr25519`'s did -- gated anyway, for one single feature
+/// flag to control "is sr25519 dev tooling available," not two.
 #[derive(Encode, Decode, TypeInfo, Clone, PartialEq, Eq, Debug)]
 pub enum ArgonautSigner {
     Falcon(FalconPublic),
-    #[cfg(feature = "std")]
+    #[cfg(feature = "dev-signatures")]
     Sr25519(sp_core::sr25519::Public),
 }
 
 /// Lets dev/testnet chain specs derive accounts from well-known sr25519 seeds
 /// (e.g. `//Alice`) the same way they always have, via `AccountPublic::from(..)`.
-#[cfg(feature = "std")]
+#[cfg(feature = "dev-signatures")]
 impl From<sp_core::sr25519::Public> for ArgonautSigner {
     fn from(pk: sp_core::sr25519::Public) -> Self {
         ArgonautSigner::Sr25519(pk)
@@ -77,7 +94,7 @@ impl IdentifyAccount for ArgonautSigner {
     fn into_account(self) -> AccountId32 {
         match self {
             ArgonautSigner::Falcon(pk) => AccountId32::from(falcon_crypto::pk_hash(&pk.0)),
-            #[cfg(feature = "std")]
+            #[cfg(feature = "dev-signatures")]
             ArgonautSigner::Sr25519(pk) => AccountId32::from(pk),
         }
     }
@@ -101,6 +118,7 @@ impl Verify for ArgonautSignature {
             // by the `CheckFalconSignature` TransactionExtension, which does have
             // storage access to look the key up.
             ArgonautSignature::Falcon { .. } => false,
+            #[cfg(feature = "dev-signatures")]
             ArgonautSignature::Sr25519(sig) => sig.verify(msg, &who.into()),
         }
     }

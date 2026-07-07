@@ -3,13 +3,15 @@
 //! # Stage 1 (B3): conservative k-deep confirmation
 //! Leader at level ℓ is confirmed when every vote for it is ≥ K_DEEP blocks
 //! behind its voter-chain tip. Latency ≈ Bitcoin; obviously safe. Acceptable
-//! for the first devnet. The actual rule lives in
-//! [`argonaut_prism_chain::PrismChain::confirmed_leader_at_level`] (per-vote
-//! depth tracking added alongside it); this crate just walks it forward.
+//! for the first devnet. [`confirmed_leader_at_level`] implements the rule
+//! (AF-2: moved here from `PrismChain` -- architecture guide §3.8 assigns
+//! *all* confirmation to this crate, not the DAG state machine; `PrismChain`
+//! only needs to expose the raw facts the policy reads, which were already
+//! public fields).
 //!
 //! # Stage 2 (B4): §4.5 confidence-interval fast confirmation
-//! TODO: implement `V_lower_n(r)` / `V_upper_n(r)` and the private-block upper
-//! bound. Port constants (δ_d table) from paper §4.5.1.
+//! See [`confirmation`]. `δ_d`'s exact paper constant (Appendix E.1) is an
+//! explicit, flagged placeholder, not derived -- see that module's docs.
 //!
 //! # BuildLedger (paper Alg. 2)
 //! For confirmed leader sequence p_1..p_ℓ: expand each leader's direct+indirect
@@ -35,6 +37,47 @@ pub mod confirmation;
 /// Conservative k-deep confirmation threshold (Stage 1).
 pub const K_DEEP_CONFIRMATION: u64 = 6;
 
+/// Stage-1 "conservative k-deep" leader confirmation (architecture guide
+/// §3.8, paper §4.1's conservative policy): `level` is confirmed once
+/// *every* voter chain has cast its vote for the canonical proposer at that
+/// level, and every one of those votes is at least `k` blocks behind its
+/// chain's current tip (deep enough that reversing it via reorg would need
+/// to out-race `k` blocks of work -- the same safety margin as a
+/// k-confirmation Bitcoin payment). Deliberately conservative/unanimous
+/// rather than a fast probabilistic threshold, matching "stage 1,
+/// correctness-first, latency ~Bitcoin" from the guide; [`confirmation`]'s
+/// stage-2 confidence-interval rule is a separate, faster mechanism layered
+/// on top.
+///
+/// Returns `None` if the level has no proposer yet, if any chain hasn't
+/// voted on it yet, or if any chain's vote isn't `k`-deep yet -- callers
+/// should treat all three as "not confirmed yet," not an error.
+pub fn confirmed_leader_at_level(chain: &PrismChain, level: u64, k: u64) -> Option<H256> {
+    let proposer = *chain.level_proposer.get(&level)?;
+    let m = chain.params.m_voter_chains as usize;
+
+    for chain_idx in 0..m {
+        if chain.unvoted_levels[chain_idx].contains_key(&level) {
+            return None; // this chain hasn't voted on this level yet
+        }
+    }
+
+    let info = chain.votes.get(&proposer)?;
+    if info.per_chain.len() != m {
+        return None; // shouldn't happen once every chain has voted, but guard defensively
+    }
+    let all_k_deep = info.per_chain.iter().all(|(&chain_idx, &depth)| {
+        let tip_depth = chain.voter_tips[chain_idx as usize].1;
+        tip_depth.saturating_sub(depth) >= k
+    });
+
+    if all_k_deep {
+        Some(proposer)
+    } else {
+        None
+    }
+}
+
 /// A newly confirmed leader level, with its BuildLedger delta already computed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfirmedLevel {
@@ -43,6 +86,16 @@ pub struct ConfirmedLevel {
     /// Txs newly introduced by this level (already deduped against every tx
     /// emitted by any earlier confirmed level).
     pub txs: Vec<Vec<u8>>,
+    /// The leader `PrismBlock`'s own `SuperHeader.timestamp_ms` -- a
+    /// deterministic function of the confirmed DAG (baked into the block's
+    /// hash, so every node that agrees on `leader` agrees on this bit-for-
+    /// bit). The bridge (`node/src/bridge.rs`) uses this instead of local
+    /// wall-clock time for the Substrate block's timestamp inherent --
+    /// using `SystemTime::now()` there made two honest nodes confirming the
+    /// same level produce different block hashes, violating the "every
+    /// honest node derives the identical Substrate block" contract
+    /// (architecture guide §3.1).
+    pub timestamp_ms: u64,
 }
 
 /// Walks confirmed Prism leader levels forward, one at a time, producing each
@@ -71,14 +124,42 @@ impl PrismLedger {
     /// stops at the first level not yet confirmed and never skips ahead, so
     /// the ledger delta at level ℓ can always assume every earlier level's
     /// txs have already been emitted.
+    ///
+    /// B-4: tries stage-2's confidence-interval confirmation
+    /// ([`confirmation::confirm_unique_leader`]) first, falling back to
+    /// stage-1's conservative k-deep rule -- stage-2's list is guaranteed to
+    /// contain the eventual leader, so a *uniquely* confirmed stage-2 leader
+    /// is safe to act on before stage-1's unanimity requirement is met.
+    /// Since this function is called repeatedly (every bridge wakeup, per
+    /// AF-1), whichever rule fires first in real time is the one that ends
+    /// up confirming the level -- there's no separate "race" to coordinate,
+    /// just checking both every time. Stage-2's numeric margin (`δ_d`) is
+    /// still a flagged placeholder (B-3, not yet the paper's derived
+    /// constant), so this is "faster when available, never less safe than
+    /// stage-1 alone" rather than a fully paper-faithful latency win yet.
     pub fn advance(&mut self, chain: &PrismChain, k: u64) -> Vec<ConfirmedLevel> {
         let mut out = Vec::new();
         loop {
             let next = self.confirmed_tip + 1;
-            let Some(leader) = chain.confirmed_leader_at_level(next, k) else {
+            let stage2 = confirmation::confirm_unique_leader(
+                chain,
+                next,
+                &confirmation::ConfirmationParams::default(),
+            );
+            let Some(leader) = stage2.or_else(|| confirmed_leader_at_level(chain, next, k)) else {
                 break;
             };
             let txs = self.build_ledger_delta_for_leader(&leader);
+            // The leader block's own timestamp -- deterministic across every
+            // node that agrees on `leader` (it's part of what's hashed into
+            // the block's identity). See `ConfirmedLevel::timestamp_ms`.
+            let timestamp_ms = self
+                .db
+                .get_block(&leader)
+                .ok()
+                .flatten()
+                .map(|b| b.header.timestamp_ms)
+                .unwrap_or(0);
 
             let _ = self.db.put_h256(
                 columns::PROPOSER_LEADER_SEQUENCE,
@@ -92,7 +173,7 @@ impl PrismLedger {
             );
 
             self.confirmed_tip = next;
-            out.push(ConfirmedLevel { level: next, leader, txs });
+            out.push(ConfirmedLevel { level: next, leader, txs, timestamp_ms });
         }
         out
     }

@@ -160,24 +160,20 @@ pub fn new_full<N: sc_network::NetworkBackend<Block, <Block as sp_runtime::trait
     // own DAG state machine, gossip/sync protocols, miner, and (B3) the bridge
     // that derives the actual Substrate chain from confirmed leader levels.
     //
-    // Deliberately NOT `Params::testnet()` unmodified: at m=100 voter chains,
-    // testnet's difficulty (calibrated for a single-target PoW chain) produces
-    // several *dozen* Prism blocks per second on one CPU, since any of the 102
-    // slots succeeding counts as a find. Empirically that flood of
-    // notifications was enough to trip peer reputation/rate-limiting and drop
-    // the connection within a couple of seconds during live two-node testing
-    // (B2). Scaled down ~100x (roughly `log2(102)` extra bits) to land in a
-    // manageable single-digit-second range -- `f_v`/`f_t`/`f_p` are scaled
-    // identically alongside `difficulty` so the m=100 slot split is preserved
-    // exactly (only `m_voter_chains` itself would need `f_v`/`f_t`/`f_p`
-    // rederiving from scratch, per `client/prism-ledger`'s own devnet-tuning
-    // notes in `docs/IMPLEMENTATION_B_PROGRESS.md`).
+    // B-2: this is now only the *initial guess* `PrismChain`'s
+    // `DifficultyRetarget` starts correcting from (matching Bitcoin's own
+    // genesis-difficulty pattern), not a permanent hardcoded scale -- it's
+    // fed every accepted block's timestamp and adjusts `difficulty`/`f_v`/
+    // `f_t`/`f_p` toward `Params::target_interval_ms` over time. Started
+    // from `Params::testnet()`'s own raw difficulty scaled down by the same
+    // empirical `>>7` factor B2 found necessary (at m=100 voter chains,
+    // testnet's unscaled difficulty produces several *dozen* Prism blocks
+    // per second on one CPU, enough to trip peer reputation/rate-limiting),
+    // so the first `RETARGET_WINDOW` blocks -- before retargeting has fired
+    // even once -- don't reproduce that flood while waiting to converge.
     let prism_params = {
         let mut p = PrismParams::testnet();
-        p.difficulty = p.difficulty >> 7;
-        p.f_v = p.f_v >> 7;
-        p.f_t = p.f_t >> 7;
-        p.f_p = p.f_p >> 7;
+        p.set_combined_target(p.difficulty >> 7);
         p
     };
     let prism_db = Arc::new(
@@ -186,13 +182,18 @@ pub fn new_full<N: sc_network::NetworkBackend<Block, <Block as sp_runtime::trait
     );
     let prism_chain = Arc::new(Mutex::new(PrismChain::with_db(prism_params.clone(), prism_db.clone())));
 
+    // AF-1: shared between the network worker (signals it whenever an
+    // accepted block's `may_confirm` comes back true) and the bridge task
+    // (wakes on it instead of polling on a fixed timer).
+    let confirmation_notify = Arc::new(tokio::sync::Notify::new());
+
     let (prism_worker, prism_mined_tx) = PrismNetworkWorker::new(
         prism_notification_service,
         prism_sync_rx,
         network.clone(),
         prism_chain.clone(),
         prism_db.clone(),
-        prism_params.clone(),
+        confirmation_notify.clone(),
     );
     task_manager.spawn_handle().spawn("prism-network", Some("prism"), prism_worker.run());
 
@@ -204,7 +205,14 @@ pub fn new_full<N: sc_network::NetworkBackend<Block, <Block as sp_runtime::trait
     task_manager.spawn_handle().spawn(
         "prism-bridge",
         Some("prism"),
-        run_prism_bridge(client.clone(), client.clone(), prism_chain.clone(), prism_db, K_DEEP_CONFIRMATION),
+        run_prism_bridge(
+            client.clone(),
+            client.clone(),
+            prism_chain.clone(),
+            prism_db,
+            K_DEEP_CONFIRMATION,
+            confirmation_notify,
+        ),
     );
 
     if config.offchain_worker.enabled {
@@ -279,11 +287,19 @@ pub fn new_full<N: sc_network::NetworkBackend<Block, <Block as sp_runtime::trait
                 std::thread::sleep(Duration::from_millis(500));
                 let mempool: Vec<Vec<u8>> =
                     mempool_pool.ready().map(|tx| tx.data().encode()).collect();
-                let tmpl = {
+                let (tmpl, live_params) = {
                     let chain = prism_chain.lock().expect("PrismChain mutex poisoned");
-                    build_template(&chain, &mempool, queue, 8, &prism_params)
+                    // B-2: read `chain.params` (live, retargeted), not the
+                    // frozen `prism_params` this thread closed over -- both
+                    // the template's difficulty and the miner's own gating
+                    // params must come from the same snapshot, or a
+                    // retargeted `header.difficulty` can end up stamped on a
+                    // block that was actually accepted under stale sortition
+                    // thresholds (see `PrismMiner::refresh`'s doc comment).
+                    let tmpl = build_template(&chain, &mempool, queue, 8, &chain.params);
+                    (tmpl, chain.params.clone())
                 };
-                prism_miner.refresh(tmpl);
+                prism_miner.refresh(tmpl, live_params);
                 queue = (queue + 1) % 8;
             }
         });

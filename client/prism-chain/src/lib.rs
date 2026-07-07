@@ -12,8 +12,10 @@
 //! ancestor (LCA). `recount_votes` independently recomputes vote totals by
 //! replaying each chain's current canonical history from scratch; it must
 //! always agree with the incrementally-maintained totals in `votes`.
-use argonaut_primitives_prism::{block_hash, BlockContent, ChainId, Params, PrismBlock, H256};
-use argonaut_prism_db::PrismDb;
+use argonaut_primitives_prism::{
+    block_hash, BlockContent, ChainId, DifficultyRetarget, Params, PrismBlock, H256,
+};
+use argonaut_prism_db::{columns, PrismDb};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
@@ -92,6 +94,9 @@ pub struct PrismChain {
     voter_meta: HashMap<H256, VoterMeta>,
     proposer_meta: HashMap<H256, ProposerMeta>,
     db: Option<Arc<PrismDb>>,
+    /// B-2: rolling-window difficulty retarget, fed one timestamp per
+    /// accepted block (any content type -- see `observe_for_retarget`).
+    retarget: DifficultyRetarget,
 }
 
 /// Shared genesis sentinel used by every voter chain and the proposer tree.
@@ -130,16 +135,41 @@ impl PrismChain {
             voter_meta,
             proposer_meta,
             db: None,
+            retarget: DifficultyRetarget::new(),
         }
     }
 
     /// Same as [`PrismChain::new`], but persists every accepted block's full
     /// body to `db` as it's inserted (best-effort: a DB write failure does not
     /// abort insertion, since in-memory state is still consistent either way).
-    pub fn with_db(params: Params, db: Arc<PrismDb>) -> Self {
+    /// Also restores the last-persisted difficulty target (B-2), if any, so a
+    /// restart resumes from wherever retargeting last left off instead of
+    /// `params`'s initial guess every time.
+    pub fn with_db(mut params: Params, db: Arc<PrismDb>) -> Self {
+        if let Ok(Some(target)) = db.get_u256(columns::CURRENT_DIFFICULTY_TARGET, b"current") {
+            params.set_combined_target(target);
+        }
         let mut chain = Self::new(params);
         chain.db = Some(db);
         chain
+    }
+
+    /// Feed a newly-*accepted* block's timestamp to the difficulty retarget
+    /// (B-2). Must be called exactly once per accepted block -- not from an
+    /// orphaning path, and not for a block that's about to be orphaned,
+    /// since `drain_orphans` re-runs `insert_block` for a block once its
+    /// deps arrive, which would double-count it here if this were called
+    /// unconditionally at `insert_block`'s entry instead of from each
+    /// content-type's "accepted" arm.
+    fn observe_for_retarget(&mut self, timestamp_ms: u64) {
+        if let Some(new_target) =
+            self.retarget.observe(timestamp_ms, self.params.target_interval_ms, self.params.difficulty)
+        {
+            self.params.set_combined_target(new_target);
+            if let Some(db) = &self.db {
+                let _ = db.put_u256(columns::CURRENT_DIFFICULTY_TARGET, b"current", &new_target);
+            }
+        }
     }
 
     /// Main entry point — idempotent block insertion.
@@ -151,6 +181,7 @@ impl PrismChain {
     /// dependency-resolution deadlocks.
     pub fn insert_block(&mut self, block: PrismBlock) -> InsertOutcome {
         let hash = block_hash(&block.header);
+        let timestamp_ms = block.header.timestamp_ms;
         let mut outcome = InsertOutcome::default();
 
         match &block.content {
@@ -158,6 +189,7 @@ impl PrismChain {
                 self.persist(&block);
                 self.known_tx_blocks.insert(hash);
                 self.unreferenced_tx_blocks.insert(hash);
+                self.observe_for_retarget(timestamp_ms);
             }
 
             BlockContent::Proposer { tx_refs, prop_refs } => {
@@ -186,6 +218,7 @@ impl PrismChain {
                     }
                     self.unreferenced_proposers.insert(hash);
                     outcome.may_confirm = true;
+                    self.observe_for_retarget(timestamp_ms);
                 } else {
                     self.orphans.insert(hash, block);
                 }
@@ -205,6 +238,7 @@ impl PrismChain {
                     self.insert_voter(hash, *chain, *voter_parent, votes.clone());
                     self.persist(&block);
                     outcome.may_confirm = true;
+                    self.observe_for_retarget(timestamp_ms);
                 }
             }
         }
@@ -424,47 +458,6 @@ impl PrismChain {
             .map(|(hash, _)| (*hash, totals.get(hash).copied().unwrap_or(0)))
             .max_by_key(|(hash, votes)| (*votes, *hash))
             .map(|(hash, _)| hash)
-    }
-
-    /// Stage-1 "conservative k-deep" leader confirmation (architecture guide
-    /// §3.8, paper §4.1's conservative policy): `level` is confirmed once
-    /// *every* voter chain has cast its vote for the canonical proposer at
-    /// that level, and every one of those votes is at least `k` blocks behind
-    /// its chain's current tip (deep enough that reversing it via reorg would
-    /// need to out-race `k` blocks of work -- the same safety margin as a
-    /// k-confirmation Bitcoin payment). Deliberately conservative/unanimous
-    /// rather than a fast probabilistic threshold, matching "stage 1,
-    /// correctness-first, latency ~Bitcoin" from the guide; stage 2's
-    /// confidence-interval rule (Def. 4.5) is a separate, faster mechanism
-    /// layered on top later.
-    ///
-    /// Returns `None` if the level has no proposer yet, if any chain hasn't
-    /// voted on it yet, or if any chain's vote isn't `k`-deep yet -- callers
-    /// should treat all three as "not confirmed yet," not an error.
-    pub fn confirmed_leader_at_level(&self, level: u64, k: u64) -> Option<H256> {
-        let proposer = *self.level_proposer.get(&level)?;
-        let m = self.params.m_voter_chains as usize;
-
-        for chain_idx in 0..m {
-            if self.unvoted_levels[chain_idx].contains_key(&level) {
-                return None; // this chain hasn't voted on this level yet
-            }
-        }
-
-        let info = self.votes.get(&proposer)?;
-        if info.per_chain.len() != m {
-            return None; // shouldn't happen once every chain has voted, but guard defensively
-        }
-        let all_k_deep = info.per_chain.iter().all(|(&chain_idx, &depth)| {
-            let tip_depth = self.voter_tips[chain_idx as usize].1;
-            tip_depth.saturating_sub(depth) >= k
-        });
-
-        if all_k_deep {
-            Some(proposer)
-        } else {
-            None
-        }
     }
 
     fn persist(&self, block: &PrismBlock) {

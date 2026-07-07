@@ -30,3 +30,13 @@ std = [
     "fn-dsa-vrfy",
     "blake3/std",
 ]
+# Dev-only escape hatch (sr25519 bootstrap signing, e.g. `//Alice`-style dev
+# accounts). Deliberately independent of `std`/`default` -- see the doc
+# comment on `ArgonautSignature::Sr25519`. `runtime/build.rs`'s
+# `WasmBuilder` runs the wasm build as a fully separate `--no-default-
+# features` cargo invocation with no explicit feature-forwarding, so this
+# feature reaches the wasm blob only if `runtime/Cargo.toml`'s own
+# `dev-signatures` feature is threaded there explicitly -- it isn't, by
+# design (see runtime/Cargo.toml). Native crates (node tooling, chain specs,
+# benchmarking) opt in directly.
+dev-signatures = []

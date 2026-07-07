@@ -16,6 +16,7 @@ use argonaut_primitives_prism::H256;
 use argonaut_runtime::opaque::{Block, UncheckedExtrinsic};
 use parity_scale_codec::{Decode, Encode};
 use sc_block_builder::BlockBuilderBuilder;
+use sc_client_api::StorageProvider;
 use sc_consensus::{
     import_queue::Verifier, BlockImport, BlockImportParams, ForkChoiceStrategy, ImportResult,
     StateAction, StorageChanges,
@@ -27,6 +28,37 @@ use sp_runtime::generic::DigestItem;
 use sp_runtime::traits::Block as BlockT;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+/// Must match `pallet_timestamp::Config::MinimumPeriod` in `runtime/src/lib.rs`
+/// (`ConstU64<{ SLOT_DURATION / 2 }>`). Duplicated here (rather than adding a
+/// `pallet-timestamp` dependency just to read one `Get` impl) the same way
+/// `K_DEEP_CONFIRMATION` is duplicated between `prism-ledger` and this crate
+/// -- if the runtime's `MinimumPeriod` ever changes, update this too.
+const TIMESTAMP_MINIMUM_PERIOD_MS: u64 = argonaut_runtime::SLOT_DURATION / 2;
+
+/// Raw storage key for `pallet_timestamp::Now` (`twox_128("Timestamp") ++
+/// twox_128("Now")`) -- there's no dedicated runtime API for reading it back,
+/// and adding one just for this would be a bigger surface than a raw read.
+fn timestamp_now_key() -> sp_core::storage::StorageKey {
+    let mut key = sp_io::hashing::twox_128(b"Timestamp").to_vec();
+    key.extend(sp_io::hashing::twox_128(b"Now"));
+    sp_core::storage::StorageKey(key)
+}
+
+/// The previous Substrate block's `pallet_timestamp::Now`, or 0 at genesis.
+/// Reading this from chain state (rather than, say, the bridge's own
+/// in-memory "last timestamp used") is what keeps it correct across restarts
+/// and across nodes with different histories -- it's the one place every
+/// honest node's view is guaranteed to agree, since it's already-imported
+/// on-chain state.
+fn previous_timestamp(client: &FullClient, parent_hash: <Block as BlockT>::Hash) -> u64 {
+    client
+        .storage(parent_hash, &timestamp_now_key())
+        .ok()
+        .flatten()
+        .and_then(|data| u64::decode(&mut &data.0[..]).ok())
+        .unwrap_or(0)
+}
 
 /// Embedded in every bridge-built block's digest, for auditability: which
 /// confirmed Prism leader level and proposer hash this block corresponds to.
@@ -74,23 +106,38 @@ impl Verifier<Block> for PrismBridgeVerifier {
     }
 }
 
-/// Polls `prism_chain` for newly confirmed leader levels and turns each into
-/// exactly one Substrate block (architecture guide §3.8's bridge pseudocode).
-/// `block_import` is a second handle onto the same client used for the import
-/// queue (`Arc<FullClient>` is cheap to clone and implements `BlockImport`
-/// directly) -- self-authored blocks are imported here directly, never going
-/// through the queue/[`PrismBridgeVerifier`] above.
+/// Reacts to `prism_chain` for newly confirmed leader levels and turns each
+/// into exactly one Substrate block (architecture guide §3.8's bridge
+/// pseudocode). `block_import` is a second handle onto the same client used
+/// for the import queue (`Arc<FullClient>` is cheap to clone and implements
+/// `BlockImport` directly) -- self-authored blocks are imported here
+/// directly, never going through the queue/[`PrismBridgeVerifier`] above.
+///
+/// AF-1: woken by `confirmation_notify` (signaled by
+/// `client/prism-network`'s `PrismNetworkWorker` whenever an accepted
+/// block's `may_confirm` comes back true) instead of polling on a fixed
+/// timer -- this used to be a plain `sleep(250ms)` loop despite
+/// `InsertOutcome::may_confirm` existing specifically to drive this wakeup,
+/// which meant every confirmed level paid up to 250ms of pure waiting
+/// latency for no reason, on top of needlessly re-locking `prism_chain`
+/// every quarter-second whether or not anything had changed. A long
+/// fallback tick remains as a safety net (e.g. the very first check, or if
+/// a signal is ever somehow missed).
 pub async fn run_prism_bridge(
     client: Arc<FullClient>,
     block_import: Arc<FullClient>,
     prism_chain: Arc<Mutex<PrismChain>>,
     prism_db: Arc<PrismDb>,
     k_deep: u64,
+    confirmation_notify: Arc<tokio::sync::Notify>,
 ) {
     let mut ledger = PrismLedger::new(prism_db);
 
     loop {
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        tokio::select! {
+            _ = confirmation_notify.notified() => {},
+            _ = tokio::time::sleep(Duration::from_secs(5)) => {},
+        }
 
         let confirmed = {
             let chain = prism_chain.lock().expect("PrismChain mutex poisoned");
@@ -99,8 +146,15 @@ pub async fn run_prism_bridge(
 
         for level in confirmed {
             let level_no = level.level;
-            if let Err(err) =
-                build_and_import_block(&client, &block_import, level.level, level.leader, level.txs).await
+            if let Err(err) = build_and_import_block(
+                &client,
+                &block_import,
+                level.level,
+                level.leader,
+                level.txs,
+                level.timestamp_ms,
+            )
+            .await
             {
                 log::error!(
                     target: "prism-bridge",
@@ -117,6 +171,7 @@ async fn build_and_import_block(
     level: u64,
     leader: H256,
     txs: Vec<Vec<u8>>,
+    leader_timestamp_ms: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let info = client.info();
     let parent_hash = info.best_hash;
@@ -127,8 +182,25 @@ async fn build_and_import_block(
         .with_parent_block_number(parent_number)
         .build()?;
 
+    // Deterministic timestamp (B-1 fix): every honest node that confirms the
+    // same leader must derive the identical Substrate block, but
+    // `from_system_time()` used the *local* wall clock, so two nodes
+    // confirming the same level moments apart produced different block
+    // hashes -- found live, never actually caught by the (never-run)
+    // byte-identical-chains test the B3 acceptance criterion calls for.
+    // `leader_timestamp_ms` is part of the leader block's own header (baked
+    // into its hash), so every node agrees on it bit-for-bit. It's clamped
+    // forward to respect `pallet_timestamp`'s hard invariant
+    // (`now >= previous + MinimumPeriod`, enforced via `assert!` -- a
+    // violation panics block production, not just fails gracefully) rather
+    // than trusting it could only ever increase on its own: Prism leader
+    // timestamps come from independently-mined blocks and aren't guaranteed
+    // monotonic across levels.
+    let prev_ts = previous_timestamp(client, parent_hash);
+    let ts = leader_timestamp_ms.max(prev_ts.saturating_add(TIMESTAMP_MINIMUM_PERIOD_MS));
+
     let mut inherent_data = sp_inherents::InherentData::new();
-    sp_timestamp::InherentDataProvider::from_system_time()
+    sp_timestamp::InherentDataProvider::new(ts.into())
         .provide_inherent_data(&mut inherent_data)
         .await?;
 
