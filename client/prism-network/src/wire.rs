@@ -26,7 +26,7 @@ use sc_network::{
 };
 use futures::FutureExt;
 use sp_runtime::traits::Block as BlockT;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 /// Build the `/argonaut/prism/blocks/1` notification protocol config + its
@@ -199,15 +199,143 @@ impl PrismNetworkWorker {
     }
 
     fn answer_sync_request(&self, payload: &[u8]) -> Result<Vec<u8>, ()> {
-        let SyncRequest::GetBlocks(hashes) = SyncRequest::decode(&mut &payload[..]).map_err(|_| ())?;
-        let blocks = hashes
-            .into_iter()
-            .filter_map(|h| self.db.get_block(&h).ok().flatten())
-            .collect();
-        Ok(SyncResponse::Blocks(blocks).encode())
+        match SyncRequest::decode(&mut &payload[..]).map_err(|_| ())? {
+            SyncRequest::GetBlocks(hashes) => {
+                let blocks = hashes
+                    .into_iter()
+                    .filter_map(|h| self.db.get_block(&h).ok().flatten())
+                    .collect();
+                Ok(SyncResponse::Blocks(blocks).encode())
+            }
+            SyncRequest::GetStatus => {
+                let chain = self.chain.lock().expect("PrismChain mutex poisoned");
+                Ok(SyncResponse::Status {
+                    proposer_best_level: chain.proposer_best_level,
+                    voter_tips: chain.voter_tips.iter().map(|(h, _)| *h).collect(),
+                    unreferenced_proposers: chain.unreferenced_proposers.iter().copied().collect(),
+                    unreferenced_tx_blocks: chain.unreferenced_tx_blocks.iter().copied().collect(),
+                }
+                .encode())
+            }
+        }
+    }
+
+    /// B-6: ask `peer` for its DAG frontier and, for anything in it we don't
+    /// already have, kick off `backfill`. Filtering against
+    /// `PrismChain::has_block` (rather than e.g. this worker's own `seen`
+    /// cache) is what makes this safe across restarts: `seen` starts empty
+    /// on every new `PrismNetworkWorker`, but `has_block` reads the
+    /// replay-restored chain state directly, so a restarted node doesn't
+    /// re-request blocks it already recovered via `PrismChain::with_db`.
+    async fn request_status_and_maybe_backfill(&mut self, peer: PeerId) {
+        let request = SyncRequest::GetStatus.encode();
+        let result = self
+            .network
+            .request(peer, ProtocolName::from(crate::PRISM_SYNC_PROTOCOL), request, None, IfDisconnected::ImmediateError)
+            .await;
+        let Ok((response, _)) = result else { return };
+        let Ok(SyncResponse::Status { voter_tips, unreferenced_proposers, unreferenced_tx_blocks, .. }) =
+            SyncResponse::decode(&mut response.as_slice())
+        else {
+            return;
+        };
+
+        let seed: Vec<H256> = {
+            let chain = self.chain.lock().expect("PrismChain mutex poisoned");
+            voter_tips
+                .iter()
+                .chain(unreferenced_proposers.iter())
+                .chain(unreferenced_tx_blocks.iter())
+                .filter(|h| !chain.has_block(h))
+                .copied()
+                .collect()
+        };
+        if seed.is_empty() {
+            return;
+        }
+        log::info!(target: "prism", "backfill: {} unknown hash(es) from {peer}", seed.len());
+        self.backfill(peer, seed).await;
+    }
+
+    /// Iteratively resolve `seed` and everything it transitively depends on
+    /// from `peer`, in batches, retrying a bounded number of rounds before
+    /// dropping a hash a peer never actually delivers. Each returned block
+    /// is inserted via `insert_backfill_block`, which -- unlike `process` --
+    /// never re-gossips (a fresh/long-offline node backfilling years of
+    /// history shouldn't flood it back out to everyone else).
+    async fn backfill(&mut self, peer: PeerId, seed: Vec<H256>) {
+        const BATCH: usize = 64;
+        const MAX_ROUNDS_MISSING: u32 = 5;
+
+        let mut pending: HashMap<H256, u32> = seed.into_iter().map(|h| (h, 0)).collect();
+        while !pending.is_empty() {
+            let batch: Vec<H256> = pending.keys().take(BATCH).copied().collect();
+            let request = SyncRequest::GetBlocks(batch.clone()).encode();
+            let result = self
+                .network
+                .request(peer, ProtocolName::from(crate::PRISM_SYNC_PROTOCOL), request, None, IfDisconnected::ImmediateError)
+                .await;
+            let Ok((response, _)) = result else {
+                // Peer unreachable this round -- drop the batch rather than
+                // spin on a dead peer; a live peer re-advertises via the
+                // next periodic status check.
+                for h in &batch {
+                    pending.remove(h);
+                }
+                continue;
+            };
+            let blocks = match SyncResponse::decode(&mut response.as_slice()) {
+                Ok(SyncResponse::Blocks(blocks)) => blocks,
+                _ => Vec::new(),
+            };
+
+            let mut returned = HashSet::new();
+            for block in blocks {
+                let hash = block_hash(&block.header);
+                returned.insert(hash);
+                pending.remove(&hash);
+                for missing in self.insert_backfill_block(block) {
+                    pending.entry(missing).or_insert(0);
+                }
+            }
+            for h in &batch {
+                if !returned.contains(h) {
+                    let retries = pending.entry(*h).or_insert(0);
+                    *retries += 1;
+                    if *retries > MAX_ROUNDS_MISSING {
+                        pending.remove(h);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Validate+insert a single backfilled block without gossiping it.
+    /// Returns any refs it's still missing, so the caller can fold them
+    /// back into its own pending queue -- this is the iterative-work-queue
+    /// analogue of `process`'s recursive `fetch`.
+    fn insert_backfill_block(&mut self, block: argonaut_primitives_prism::PrismBlock) -> Vec<H256> {
+        let outcome = {
+            let mut chain = self.chain.lock().expect("PrismChain mutex poisoned");
+            let params = chain.params.clone();
+            handle_announcement(BlockAnnouncement::Full(block), &params, &mut self.seen, &mut chain)
+        };
+        if outcome.may_confirm {
+            self.confirmation_notify.notify_one();
+        }
+        for block in &outcome.to_gossip {
+            log::info!(target: "prism", "backfilled block {:?}", block_hash(&block.header));
+        }
+        outcome.to_fetch
     }
 
     pub async fn run(mut self) {
+        // B-6: slow periodic re-check so a node that's long-offline (or that
+        // missed backfilling everything on first connect, e.g. a peer that
+        // was itself still catching up) eventually converges without
+        // needing a fresh `NotificationStreamOpened` event.
+        let mut resync = tokio::time::interval(std::time::Duration::from_secs(30));
+        resync.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             futures::select! {
                 event = self.notification_service.next_event().fuse() => {
@@ -220,6 +348,7 @@ impl PrismNetworkWorker {
                         NotificationEvent::NotificationStreamOpened { peer, .. } => {
                             log::info!(target: "prism", "substream opened with {peer}");
                             self.peers.insert(peer);
+                            self.request_status_and_maybe_backfill(peer).await;
                         }
                         NotificationEvent::NotificationStreamClosed { peer } => {
                             log::info!(target: "prism", "substream closed with {peer}");
@@ -244,6 +373,11 @@ impl PrismNetworkWorker {
                 mined = futures::stream::StreamExt::next(&mut self.mined_blocks).fuse() => {
                     let Some(block) = mined else { continue };
                     self.process(BlockAnnouncement::Full(block), None).await;
+                }
+                _ = resync.tick().fuse() => {
+                    for peer in self.peers.iter().copied().collect::<Vec<_>>() {
+                        self.request_status_and_maybe_backfill(peer).await;
+                    }
                 }
             }
         }

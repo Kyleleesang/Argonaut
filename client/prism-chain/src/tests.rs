@@ -505,3 +505,38 @@ fn with_db_recovers_full_dag_state_after_a_restart() {
         "only the surviving b-fork's vote for p1 should remain after the reorg"
     );
 }
+
+/// B-6: `has_block` is what `client/prism-network`'s backfill path uses to
+/// filter a peer's `Status` response down to genuinely-unknown hashes --
+/// get this wrong and a backfill can re-run `insert_block` on an
+/// already-accepted proposer, corrupting `unreferenced_proposers`.
+#[test]
+fn has_block_reports_every_known_block_kind_and_not_unknown_ones() {
+    let mut chain = PrismChain::new(params());
+    let genesis = genesis_sentinel();
+    let mut nonce = 0u64;
+
+    let tx = tx_block(1, genesis);
+    let tx_hash = block_hash(&tx.header);
+    chain.insert_block(tx.clone());
+
+    let prop = proposer_block(2, genesis, vec![tx_hash], vec![]);
+    let prop_hash = block_hash(&prop.header);
+    chain.insert_block(prop.clone());
+
+    let voter_hash = ins(&mut chain, genesis, vec![prop_hash], &mut nonce);
+
+    // An orphan: a proposer block whose parent is never accepted.
+    let dangling_parent = H256::from([7u8; 32]);
+    let orphan = proposer_block(3, dangling_parent, vec![], vec![]);
+    let orphan_hash = block_hash(&orphan.header);
+    chain.insert_block(orphan);
+
+    assert!(chain.has_block(&genesis));
+    assert!(chain.has_block(&tx_hash));
+    assert!(chain.has_block(&prop_hash));
+    assert!(chain.has_block(&voter_hash));
+    assert!(chain.has_block(&orphan_hash), "an orphaned block is still known -- only its deps are missing");
+    assert!(!chain.has_block(&dangling_parent), "the orphan's missing parent itself was never inserted");
+    assert!(!chain.has_block(&H256::from([9u8; 32])), "a hash never seen at all");
+}

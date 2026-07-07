@@ -18,12 +18,30 @@ pub const PRISM_SYNC_PROTOCOL: &str = "/argonaut/prism/sync/1";
 #[derive(Encode, Decode, Clone, Debug)]
 pub enum SyncRequest {
     GetBlocks(Vec<H256>),
+    /// B-6: ask a peer for a snapshot of its DAG frontier, to discover
+    /// whether it's ahead of us and seed a backfill. SCALE enums decode by
+    /// variant index, so this is safe to append after `GetBlocks` -- an
+    /// older peer that doesn't know this variant simply fails to decode the
+    /// request and returns an error, which the requester already handles.
+    GetStatus,
 }
 
 /// Response message on the sync protocol.
 #[derive(Encode, Decode, Clone, Debug)]
 pub enum SyncResponse {
     Blocks(Vec<PrismBlock>),
+    /// Answer to `SyncRequest::GetStatus`: read straight off `PrismChain`'s
+    /// public fields, no dedicated DB index needed (B-7 already keeps the
+    /// in-memory DAG complete). `voter_tips` is one hash per voter chain
+    /// (chain id = index); `unreferenced_proposers`/`unreferenced_tx_blocks`
+    /// are exactly the DAG frontier a backfilling peer needs to walk
+    /// backward from.
+    Status {
+        proposer_best_level: u64,
+        voter_tips: Vec<H256>,
+        unreferenced_proposers: Vec<H256>,
+        unreferenced_tx_blocks: Vec<H256>,
+    },
 }
 
 /// Announcement on the blocks notification protocol.

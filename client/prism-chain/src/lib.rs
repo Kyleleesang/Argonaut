@@ -492,6 +492,22 @@ impl PrismChain {
             .map(|(hash, _)| hash)
     }
 
+    /// True if `hash` is already known to this chain: an accepted proposer,
+    /// voter, or transaction block, or a still-orphaned one. Used by
+    /// `client/prism-network`'s backfill path (B-6) to filter a peer's
+    /// `Status` response down to genuinely-unknown hashes before requesting
+    /// them -- re-running `insert_block` on an *already-accepted* proposer
+    /// is not idempotent (it would wrongly re-add an already-referenced
+    /// proposer to `unreferenced_proposers`), so this check must happen
+    /// before, not instead of, relying on `insert_block`'s own missing-ref
+    /// bookkeeping (which only ever adds genuinely-unknown refs).
+    pub fn has_block(&self, hash: &H256) -> bool {
+        self.proposer_meta.contains_key(hash)
+            || self.voter_meta.contains_key(hash)
+            || self.known_tx_blocks.contains(hash)
+            || self.orphans.contains_key(hash)
+    }
+
     fn persist(&self, block: &PrismBlock) {
         if self.replaying {
             return; // already on disk -- that's where replay just read it from

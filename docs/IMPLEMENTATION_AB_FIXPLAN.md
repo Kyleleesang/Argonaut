@@ -25,6 +25,7 @@ These don't need re-work. Each line is the one thing worth remembering, not a hi
 - **B-7 + AF-5** (restart correctness): fixed — `PrismChain::with_db` full-replays persisted blocks; `PrismLedger::recover` rebuilds the confirmed cursor from the Substrate client's own height. This closed a real double-confirm/double-import bug on restart, not just a performance gap.
 - **B-9** (two-honest-miner stall): root-caused, not a bug — an *exact* even split between two honest miners is structurally unresolvable forever (proven, `client/prism-ledger/src/honest_split_tests.rs`); any real skew resolves via stage-2. **Operational caveat, keep in mind for future devnet runs:** don't run small-`m` (~4), exactly-2-miner devnets expecting fast guaranteed confirmation — the paper's intended `m` (100+) makes a sustained exact tie vanishingly unlikely.
 - **B-3, partial** (paper's exact `δ_d`/`k_min`, Appendix E.1 eq. 31): the faithful port exists (`paper_k_min`, `paper_delta_d` in `client/prism-ledger/src/confirmation.rs`) but is **deliberately not wired in as the default** — the paper's literal `k_min` is in the thousands for any sane β (an asymptotic-proof artifact), which would make stage-2 *slower* than stage-1, the opposite of its purpose. `ConfirmationParams::default()` still uses the practical placeholder. **Don't "fix" this by switching the default to `paper_k_min` without re-deriving a usable operating point first** — that's the mistake this note exists to prevent.
+- **B-6** (initial sync / historical backfill): fixed — `SyncRequest::GetStatus`/`SyncResponse::Status` wire messages (`client/prism-network/src/lib.rs`); `PrismNetworkWorker::request_status_and_maybe_backfill` sends `GetStatus` on `NotificationStreamOpened` and every 30s per connected peer, filters the response against the new `PrismChain::has_block` (chain-state check, not the worker's own `seen` cache, so this is correct across restarts too), and feeds unknown hashes into `backfill`'s iterative batched (64/round) work-queue with a bounded per-hash retry count. Backfilled blocks go through `insert_backfill_block`, which skips re-gossip (unlike `process`'s live path) but is otherwise identical validation/insertion. `PrismChain::has_block` is new and load-bearing: re-`insert_block`-ing an already-accepted proposer is not idempotent (see its doc comment), so backfill must filter before requesting, not rely on `handle_announcement`'s dedup.
 
 ---
 
@@ -39,25 +40,9 @@ These don't need re-work. Each line is the one thing worth remembering, not a hi
 - [ ] AF-1: measure the actual confirmation-to-Substrate-block latency improvement.
 - [ ] B-4: measure that the devnet confirms levels faster with stage-2 live than stage-1 alone.
 - [ ] B-7/AF-5: live-devnet restart with a non-trivial DAG (unit-tested only so far).
+- [ ] B-6: two-node live backfill (fresh node2 against a non-trivial node1 history; repeat with node2 stopped mid-run and restarted) — unit-tested only so far (`insert_backfill_block`/`backfill`/`has_block` logic), no real `sc-network` run yet since `PrismNetworkWorker` has no test harness (same gap every other wire.rs-level item has).
 
-### 1. B-6: initial sync / historical backfill for Prism state
-
-**Files:** `client/prism-network` (`src/lib.rs` for wire types, `src/wire.rs` for the worker).
-
-Currently only reactive orphan-fetch exists, so a fresh/long-offline node never converges (§3.6).
-
-**Plan:**
-- **Wire: add a status exchange.** New `SyncRequest::GetStatus` → `SyncResponse::Status { proposer_best_level: u64, voter_tips: Vec<H256>, unreferenced_proposers: Vec<H256>, unreferenced_tx_blocks: Vec<H256> }`. Reads straight off `PrismChain`'s already-public fields — no new DB indices needed now that B-7 keeps the in-memory DAG complete at all times. SCALE enums decode by variant index, so appending variants keeps old messages decodable; an old node receiving `GetStatus` just fails decode and returns `Err` (fine for a devnet).
-- **Replace recursion with an iterative work-queue for the backfill path.** Convergence would already happen via the existing fetch→process→fetch recursion (same fixed-point argument B-7 proved for replay), but it resolves one hop per round trip with an unbounded `Box::pin` recursion depth. Instead: keep a `pending: HashSet<H256>` + queue; request in batches (~64 hashes, response cap 16 MiB per `sync_protocol_config`); re-queue hashes that didn't come back with a per-hash retry cap / peer rotation. Insert each returned block through `handle_announcement`, push its `to_fetch` back onto the queue, loop until empty.
-- **Trigger points:** on `NotificationStreamOpened`, send `GetStatus`; start backfill if the peer's `proposer_best_level` exceeds ours or any of its tips is unknown. Add a slow periodic re-check (~30s) so a long-offline node converges without needing a fresh connection event.
-- **Suppress re-gossip for backfilled blocks:** `process` currently floods every accepted block to all peers; pass a `from_backfill` flag that skips `gossip` but keeps validation/insertion/`may_confirm` identical.
-- **Bridge needs no changes:** a fresh node building its Substrate chain from level 1 as backfill confirms levels is the intended behavior; `PrismLedger::recover(db, client.info().best_number)` starting at 0 on a fresh node is already right.
-- **Inherits B-8's `--network-backend libp2p` requirement** (same `network.request` call site as orphan-fetch; B-8 fixes both at once).
-- **No new trust surface:** every backfilled block still flows through `validate_block` + live-params sortition checks; only new resource to bound is the pending-queue size.
-
-**Verify:** start node2 with an empty `PrismDb` (libp2p backend) against a node1 holding a long non-trivial history; node2's `proposer_best_level` converges to node1's, and `chain_getBlockHash(n)` matches node1 for every n (doubles as B-1's live check — do both in one session). Repeat with node2 stopped for a long stretch mid-run and restarted.
-
-### 2. B-5: per-chain genesis hashes (not to be confused with "B5 pruning" below)
+### 1. B-5: per-chain genesis hashes (not to be confused with "B5 pruning" below)
 
 **What it costs today:** every Prism DAG on every network roots at the shared `H256::zero()` sentinel — no network domain separation (a block mined against network A's genesis is structurally valid ancestry on network B) and no chain-slot separation at the genesis boundary. `primitives/prism::genesis_hash(chain_spec_genesis, slot)` already does the right derivation (blake3 over genesis‖slot) but is unused — this is purely plumbing:
 
@@ -70,7 +55,7 @@ Currently only reactive orphan-fetch exists, so a fresh/long-offline node never 
 
 **Verify:** adapt fixtures to a nonzero dummy genesis; new tests for foreign-genesis-orphans and wrong-chain-genesis-parent-rejected; B-7's restart-recovery test still passes with per-chain geneses. Then fresh DBs on both nodes, two-node mine-and-confirm, plus one restart.
 
-### 3. Backlog — as convenient, no correctness impact
+### 2. Backlog — as convenient, no correctness impact
 
 - [ ] **AF-3:** finer-grained DAG concurrency (per-voter-chain locks or actor model). Only when measured to matter — the whole DAG is behind one global `Mutex` today.
 - [ ] **B-8:** port `client/prism-network`'s sync-request from litep2p's `unimplemented!()` async `request` to the callback-based `start_request`, so `--network-backend libp2p` is no longer mandatory.
