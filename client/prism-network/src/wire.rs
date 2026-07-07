@@ -147,11 +147,7 @@ impl PrismNetworkWorker {
             return;
         }
         let request = SyncRequest::GetBlocks(missing).encode();
-        let result = self
-            .network
-            .request(from, ProtocolName::from(crate::PRISM_SYNC_PROTOCOL), request, None, IfDisconnected::ImmediateError)
-            .await;
-        let Ok((response, _)) = result else { return };
+        let Some(response) = sync_request(&self.network, from, request).await else { return };
         let Ok(SyncResponse::Blocks(blocks)) = SyncResponse::decode(&mut response.as_slice()) else {
             return;
         };
@@ -229,11 +225,7 @@ impl PrismNetworkWorker {
     /// re-request blocks it already recovered via `PrismChain::with_db`.
     async fn request_status_and_maybe_backfill(&mut self, peer: PeerId) {
         let request = SyncRequest::GetStatus.encode();
-        let result = self
-            .network
-            .request(peer, ProtocolName::from(crate::PRISM_SYNC_PROTOCOL), request, None, IfDisconnected::ImmediateError)
-            .await;
-        let Ok((response, _)) = result else { return };
+        let Some(response) = sync_request(&self.network, peer, request).await else { return };
         let Ok(SyncResponse::Status { voter_tips, unreferenced_proposers, unreferenced_tx_blocks, .. }) =
             SyncResponse::decode(&mut response.as_slice())
         else {
@@ -271,11 +263,7 @@ impl PrismNetworkWorker {
         while !pending.is_empty() {
             let batch: Vec<H256> = pending.keys().take(BATCH).copied().collect();
             let request = SyncRequest::GetBlocks(batch.clone()).encode();
-            let result = self
-                .network
-                .request(peer, ProtocolName::from(crate::PRISM_SYNC_PROTOCOL), request, None, IfDisconnected::ImmediateError)
-                .await;
-            let Ok((response, _)) = result else {
+            let Some(response) = sync_request(&self.network, peer, request).await else {
                 // Peer unreachable this round -- drop the batch rather than
                 // spin on a dead peer; a live peer re-advertises via the
                 // next periodic status check.
@@ -381,5 +369,49 @@ impl PrismNetworkWorker {
                 }
             }
         }
+    }
+}
+
+/// B-8: send a `/argonaut/prism/sync/1` request via `start_request`
+/// (callback-based) rather than the trait's async `request` wrapper --
+/// `Litep2pNetworkService::request` is a bare `unimplemented!()` (see
+/// `sc-network`'s litep2p backend source), so every call site that used it
+/// only worked under `--network-backend libp2p`. `start_request` is
+/// implemented identically by both backends (the libp2p backend's own
+/// `request` is itself just `start_request` + awaiting the same kind of
+/// oneshot), so routing through it here makes both backends interchangeable.
+///
+/// Deliberately a free function taking `&Arc<dyn NetworkServiceTrait>`
+/// rather than a `&self` method on `PrismNetworkWorker`: an `async fn(&self)`
+/// held across its own internal `.await` requires `PrismNetworkWorker: Sync`
+/// for the *caller's* future to stay `Send` (needed for
+/// `SpawnTaskHandle::spawn`), and `PrismNetworkWorker` isn't `Sync` --
+/// `notification_service: Box<dyn NotificationService>` isn't. `network`
+/// alone is `Arc<dyn NetworkServiceTrait>`, which is `Send + Sync` (it's
+/// already shared across many independently-spawned tasks in
+/// `node/src/service.rs`), so borrowing only that field avoids dragging the
+/// non-`Sync` field into the borrow.
+///
+/// Returns `None` uniformly for every failure mode (unreachable peer,
+/// protocol mismatch, dropped channel) -- callers already treat "no
+/// response" as "nothing to do this round," not an error worth
+/// distinguishing.
+async fn sync_request(
+    network: &Arc<dyn NetworkServiceTrait>,
+    peer: PeerId,
+    payload: Vec<u8>,
+) -> Option<Vec<u8>> {
+    let (tx, rx) = futures::channel::oneshot::channel();
+    network.start_request(
+        peer,
+        ProtocolName::from(crate::PRISM_SYNC_PROTOCOL),
+        payload,
+        None,
+        tx,
+        IfDisconnected::ImmediateError,
+    );
+    match rx.await {
+        Ok(Ok((response, _))) => Some(response),
+        _ => None,
     }
 }
