@@ -1,7 +1,6 @@
-use argonaut_runtime::{AccountId, Signature, WASM_BINARY};
+use argonaut_runtime::{AccountId, WASM_BINARY};
 use sc_service::ChainType;
 use sp_core::{sr25519, Pair, Public};
-use sp_runtime::traits::{IdentifyAccount, Verify};
 
 pub type ChainSpec = sc_chain_spec::GenericChainSpec;
 
@@ -11,13 +10,24 @@ pub fn get_from_seed<TPublic: Public>(seed: &str) -> <TPublic::Pair as Pair>::Pu
         .public()
 }
 
-type AccountPublic = <Signature as Verify>::Signer;
-
+/// Derives a dev account's `AccountId` via `sp_core`'s own
+/// `AccountId32: From<sr25519::Public>` conversion -- deliberately NOT
+/// through `ArgonautSigner`/`ArgonautSignature::Sr25519`, which requires the
+/// `dev-signatures` Cargo feature. Chain-spec account derivation doesn't
+/// need that feature at all; routing it through `ArgonautSigner` anyway was
+/// what forced every node build (including the production wasm blob) to
+/// activate `dev-signatures`, since `substrate-wasm-builder` mirrors
+/// whatever features are active on `argonaut-runtime`'s own native build
+/// into the separate wasm build it spawns -- found live, 2026-07-07 (fix
+/// plan A-1: the production-wasm-rejects-sr25519 claim had never actually
+/// been verified). Produces byte-identical `AccountId`s to the old
+/// `ArgonautSigner::Sr25519(pk).into_account()` path, since that path just
+/// called this same `sp_core` conversion under the hood.
 pub fn get_account_id_from_seed<TPublic: Public>(seed: &str) -> AccountId
 where
-    AccountPublic: From<<TPublic::Pair as Pair>::Public>,
+    AccountId: From<<TPublic::Pair as Pair>::Public>,
 {
-    AccountPublic::from(get_from_seed::<TPublic>(seed)).into_account()
+    AccountId::from(get_from_seed::<TPublic>(seed))
 }
 
 pub fn development_config() -> Result<ChainSpec, String> {

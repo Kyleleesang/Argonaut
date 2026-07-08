@@ -4,7 +4,7 @@ A standalone audit of Implementations A (Falcon signatures + registry) and B (Pr
 
 Companion to [`IMPLEMENTATION_A_PROGRESS.md`](./IMPLEMENTATION_A_PROGRESS.md) and [`IMPLEMENTATION_B_PROGRESS.md`](./IMPLEMENTATION_B_PROGRESS.md), which already record most of these as "out of scope" / "known limitation." This review pulls them into one place, adds two that the progress docs *don't* yet flag (B-1 bridge timestamp; A-1 sr25519 now in wasm), and — per the specific request that prompted it — spells out the fix for the block-difficulty deviation.
 
-> **Status as of 2026-07-07:** this doc is the original diagnosis and is left unmodified in its "why"; **[`IMPLEMENTATION_AB_FIXPLAN.md`](./IMPLEMENTATION_AB_FIXPLAN.md) is the authoritative source for what's actually been fixed since.** Each finding below now carries a one-line `Status` bullet pointing at the fixplan item that addressed (or deliberately deferred) it, so this document doesn't read as still-all-open. Quick summary: **resolved** (code-complete, live-verification still pending per the fixplan's own ground rules) — A-1, B-1/AF-4, B-2, AF-1, AF-2, B-4; **root-caused but not "fixed"** (behavior explained/proven, not a bug) — B-9; **partially addressed** — B-3 (paper's exact formula ported but not wired in as the default), B-7/AF-5 (a worse correctness bug than scoped was found and fixed; index-CF persistence itself still deferred); **still open, detailed plans written** — B-5, B-6; **still open, untouched** — A-2 (n/a, no fix needed), A-3, A-4, B-8, B-10, AF-3.
+> **Status as of 2026-07-07:** this doc is the original diagnosis and is left unmodified in its "why"; **[`IMPLEMENTATION_AB_FIXPLAN.md`](./IMPLEMENTATION_AB_FIXPLAN.md) is the authoritative source for what's actually been fixed since.** Each finding below now carries a one-line `Status` bullet pointing at the fixplan item that addressed (or deliberately deferred) it, so this document doesn't read as still-all-open. Quick summary: **resolved** (code-complete, live-verification still pending per the fixplan's own ground rules) — A-1, A-3, A-4 (size test), B-1/AF-4, B-2, B-5, B-6, B-8, AF-1, AF-2, B-4; **root-caused but not "fixed"** (behavior explained/proven, not a bug) — B-9; **partially addressed** — B-3 (paper's exact formula ported but not wired in as the default), B-7/AF-5 (a worse correctness bug than scoped was found and fixed; index-CF persistence itself still deferred); **still open, untouched** — A-2 (n/a, no fix needed), A-4 (auto-register half only), B-10, AF-3.
 
 ## Severity legend
 
@@ -36,14 +36,14 @@ Companion to [`IMPLEMENTATION_A_PROGRESS.md`](./IMPLEMENTATION_A_PROGRESS.md) an
 - **Deviation:** No CLI/script path assembles a full `General`-preamble registry-mode extrinsic (nonce/era/tip/genesis) end-to-end. Guide §2.4 implies a signer that can produce a submittable registry-mode tx.
 - **Why it matters:** Registry mode is the whole point of Impl A (the ~897-byte/tx saving), but it can't be *used* end-to-end from tooling yet — only its `TransactionExtension::validate()` is exercised, in tests. `node/examples/submit_transfer.rs` (added in B3) is a working template for the transaction-builder plumbing; a registry-mode variant of it would close this.
 - **Fix:** Extend `submit_transfer.rs` (or a new example) to build a `Preamble::General` extrinsic carrying `CheckFalconSignature::RegistryMode { sig, account }` instead of a `Signed` preamble.
-- **Status:** STILL OPEN (fixplan item 13).
+- **Status:** RESOLVED (fixplan). `node/examples/submit_transfer_registry.rs` builds a full `General`-preamble extrinsic with `CheckFalconSignature::RegistryMode` from an existing keystore.
 
 ### A-4 (L): missing acceptance tests (size assertion, auto-register)
 
 - **Where:** `pallets/falcon-registry`, `runtime/src/extensions.rs`.
 - **Deviation:** Guide §2.5 point 3 (registry-mode encoded extrinsic ≤ 850 bytes — asserted in a test) and §2.3's optional auto-register-on-first-bootstrap-tx are both unimplemented. Both already flagged in A-progress "Remaining / follow-ups."
 - **Fix:** Size test is trivial (`encode().len()` on a built registry-mode vs bootstrap-mode extrinsic, assert the delta ≈ 897). Auto-register is a config-gated branch inside `CheckFalconSignature`'s currently-no-op `Disabled`/bootstrap path.
-- **Status:** STILL OPEN (fixplan item 13).
+- **Status:** Size test RESOLVED (fixplan) — `runtime/src/tests.rs`, real Falcon-512 keypairs, registry-mode ≤ 850 bytes. **Auto-register still open** — lower value, no test-coverage gap the size assertion left open.
 
 ---
 
@@ -55,7 +55,7 @@ Companion to [`IMPLEMENTATION_A_PROGRESS.md`](./IMPLEMENTATION_A_PROGRESS.md) an
 - **Deviation:** Guide §3.1 (binding): "every honest node must derive the identical Substrate block from the same leader sequence." The B3 acceptance criterion (§3.9) is explicitly "all nodes' Substrate chains byte-identical." But the bridge stamps each block with the **local wall-clock time of whichever node confirmed the level**, via `from_system_time()`. Two honest nodes confirming the same Prism leader level a few hundred ms apart will produce blocks with different `timestamp` inherents → different `extrinsics_root` → different block hashes. The chains diverge immediately, byte-for-byte, even with zero adversary and identical transaction sets.
 - **Why it matters:** This is the single most important correctness gap in B. It directly violates the "never reorgs / deterministic output of Prism" design contract, and it means the B3 acceptance criterion is **not actually met across nodes** (this session's live test verified block *production* and the digest on one node, then ran single-miner after an unrelated crash — the two-node byte-identical diff was never actually performed, which is how this slipped through).
 - **Fix:** Derive the timestamp deterministically from Prism data, not local time. The confirmed leader's `PrismBlock` already carries `SuperHeader.timestamp_ms`; use that (or, more robustly, a deterministic function of the confirmed level's blocks — e.g. the median timestamp of the leader + its referenced tx blocks, which resists a single miner lying). Feed that fixed value into a `sp_timestamp::InherentDataProvider::new(ts.into())` instead of `from_system_time()`. Then add the missing acceptance test: run 2 nodes, confirm `chain_getBlockHash(n)` is identical on both for every `n`.
-- **Status:** RESOLVED, code side (fixplan item 1). `ConfirmedLevel` now carries the leader's own `timestamp_ms`, fed via `InherentDataProvider::new`, clamped forward against on-chain `pallet_timestamp::Now`. **Still open:** the actual two-node `chain_getBlockHash` byte-diff live-verification, and the AF-4 determinism choke-point assertion/test — this finding's own acceptance criterion.
+- **Status:** RESOLVED (fixplan). `ConfirmedLevel` carries the leader's own `timestamp_ms`, fed via `InherentDataProvider::new`, clamped forward against on-chain `pallet_timestamp::Now`. **Live-verified 2026-07-07:** two-node devnet, byte-identical `chain_getBlockHash` for levels 0–5. This run also found and fixed a second, previously-undiscovered bug in the same area — see AF-4's entry below. **Still open:** the standing AF-4 choke-point assert/test (the property was verified live, but no permanent test encodes it).
 
 ### B-2 (H, paper-model): block difficulty is a hardcoded constant with no retargeting
 
@@ -92,7 +92,7 @@ Companion to [`IMPLEMENTATION_A_PROGRESS.md`](./IMPLEMENTATION_A_PROGRESS.md) an
 - **Deviation:** Guide §3.2: geneses should be "hashed deterministically from `(chain_spec_genesis_hash, chain_id)` so every network has distinct Prism geneses." `primitives/prism::genesis_hash()` exists but is unused. Already flagged in B1 progress notes.
 - **Why it matters:** Cross-network replay / chain-id confusion once more than one Argonaut network exists — a block mined on network X is structurally valid on network Y. Irrelevant for a single devnet.
 - **Fix:** Seed `PrismChain::new` from `genesis_hash(chain_spec_genesis, chain_id)` per chain instead of the shared zero sentinel; thread the chain-spec genesis hash in from `node/src/service.rs`.
-- **Status:** STILL OPEN. Detailed implementation plan written into the fixplan doc (item 10, "B-5 detailed plan" section) on 2026-07-07 — slot convention, `Params::chain_spec_genesis` plumbing, DB migration story (purge+remine, don't build migration) — but not yet implemented.
+- **Status:** RESOLVED (fixplan). `Params::chain_spec_genesis` plumbed through `PrismChain`/`PrismMiner`/`node/src/service.rs`; `insert_block` rejects a block whose parent is some *other* chain's genesis. DB compat handled via purge-and-remine (hard error on genesis mismatch), not a migration. **Still open:** the live two-node mine-and-confirm + restart verification.
 
 ### B-6 (M): no historical backfill / initial sync for Prism state
 
@@ -100,7 +100,7 @@ Companion to [`IMPLEMENTATION_A_PROGRESS.md`](./IMPLEMENTATION_A_PROGRESS.md) an
 - **Deviation:** Guide §3.6 specifies an initial-sync strategy (request peers' voter tips + proposer best level, breadth-first backfill by parent refs). Only the orphan-resolution half exists. Already flagged in B2 progress.
 - **Why it matters:** A fresh node, or one offline longer than peers keep relevant state orphan-reachable, silently ends up with a divergent (internally-consistent) DAG and never converges. Compounds badly with B5 pruning if that's ever added.
 - **Fix:** Implement the §3.6 tip-exchange + BFS backfill. Non-trivial but self-contained in `client/prism-network`.
-- **Status:** STILL OPEN. Detailed implementation plan written into the fixplan doc (item 7, "B-6") on 2026-07-07 — `GetStatus`/`Status` wire messages, iterative work-queue replacing recursive fetch, backfill re-gossip suppression — but not yet implemented. Now depends only on B-7 having landed (it has), not on new DB indices.
+- **Status:** RESOLVED (fixplan). `SyncRequest::GetStatus`/`SyncResponse::Status` wire messages; `request_status_and_maybe_backfill` filters a peer's frontier through `PrismChain::has_block` and feeds unknowns into a batched (64/round), bounded-retry backfill queue. **Still open:** the live two-node backfill run (fresh node2 against a non-trivial history, including a stop/restart mid-backfill).
 
 ### B-7 (M): DAG indices are declared in the DB but never persisted (crash-consistency gap)
 
@@ -115,7 +115,7 @@ Companion to [`IMPLEMENTATION_A_PROGRESS.md`](./IMPLEMENTATION_A_PROGRESS.md) an
 - **Where:** polkadot-sdk `stable2412` `litep2p/service.rs` — `NetworkRequest::request` is `unimplemented!()`. `client/prism-network` calls it.
 - **Deviation:** Not a guide deviation per se — an upstream gap. But `litep2p` is the CLI's *default* backend, so any node run without `--network-backend libp2p` panics the moment it needs to fetch a missing Prism block. Found live this session.
 - **Fix:** Port `client/prism-network`'s sync-request call from the async `request` wrapper to the lower-level callback-based `start_request` (which *is* implemented for litep2p), or pin `--network-backend libp2p` in docs/tooling until upstream implements it. Recorded in the [`project-implementation-b-status`] memory.
-- **Status:** STILL OPEN (fixplan item 11). `--network-backend libp2p` remains a hard requirement for every live-verification run; B-6 backfill will inherit the same dependency until this lands.
+- **Status:** RESOLVED (fixplan). `client/prism-network/src/wire.rs` gained a free function `sync_request` using `start_request`/oneshot instead of the async `request` wrapper, so sync-protocol calls work under litep2p too. `--network-backend libp2p` is no longer a hard requirement, though it remains the tested default.
 
 ### B-9 (M): unresolved two-honest-miner confirmation stall
 
@@ -134,17 +134,15 @@ Companion to [`IMPLEMENTATION_A_PROGRESS.md`](./IMPLEMENTATION_A_PROGRESS.md) an
 
 ---
 
-## Suggested fix order
+## Fix order — what's actually left
 
-1. **B-1** (bridge timestamp determinism) — H, small fix, and it's the acceptance-criterion blocker for "byte-identical chains." Add the two-node hash-diff test alongside it.
-2. **A-1** (sr25519 behind a real feature, out of production wasm) — security hole in the release artifact; small, mechanical.
-3. **B-2** (client-side rolling-window difficulty retarget) — the core paper-model deviation; route (1) above.
-4. **B-7** (persist DAG indices atomically) — unblocks efficient restart *and* B5 pruning.
-5. **B-6 / B-9** (initial sync; two-miner stall) — needed before any serious multi-node network.
-6. **B-3 → B-4** (real `δ_d`, then wire stage-2 into the bridge) — unlocks Prism-speed confirmation.
-7. **B-5, B-8, A-3/A-4, B-10** — as convenient.
+All items through B-3→B-4, B-5, B-6, B-8, A-3, and A-4's size test are resolved (code + unit tests; see each finding's `Status` line above). What remains, in priority order:
 
-Nothing here blocks *continuing* to B5 (pruning) on a single-machine devnet, but **B-1, A-1, and B-2 should be closed before this is run as an actual multi-party network.**
+1. **Live-devnet verification** of every "resolved" item above — only `cargo test --workspace` has run so far. See [`IMPLEMENTATION_AB_FIXPLAN.md`](./IMPLEMENTATION_AB_FIXPLAN.md)'s "Live-verification debt" list for the exact runs needed (two-node byte-diff, wasm rejecting sr25519 live, retarget convergence, restart recovery, pruning end-to-end with a fresh backfilling node, etc.). This is the real gate before treating this as an actual multi-party network.
+2. **B-10** (docker-compose devnet artifact) — as convenient.
+3. **A-4's auto-register half** — as convenient, low value.
+4. **AF-3** (finer-grained DAG concurrency) — deferred by design until measured to matter.
+5. **Full network-level adversarial run** (real multi-node gossip/timing, not the single-process harness) — as convenient.
 
 ---
 
@@ -196,7 +194,7 @@ These are the load-bearing design decisions the implementation got right — lis
 
 - This is the architectural framing of **B-1**. §3.1 is *binding*: "every honest node must derive the identical Substrate block from the same leader sequence." The implementation treats this as a real contract almost everywhere (see "what matches well" above) — which is exactly why the one violation (local-wall-clock timestamp) is dangerous: the surrounding discipline makes it *look* deterministic, so the hole doesn't announce itself. An architecture that's 95% deterministic with one silent non-deterministic input is arguably worse than one that's obviously non-deterministic, because it passes single-node testing and byte-diverges only under multi-node scrutiny that hasn't been run yet.
 - **Fix:** as B-1 (deterministic timestamp from Prism data) — but the architectural lesson is broader: there should be a single, tested, enforced choke-point that asserts "every input to block construction is a pure function of confirmed DAG state." The bridge is the natural place for a `debug_assert`/test that re-deriving the same level on two `PrismChain`s with the same accepted-block set yields byte-identical `BlockImportParams`.
-- **Status:** The underlying hole is RESOLVED via B-1's fix (deterministic timestamp). **Still open:** the broader choke-point assertion/test this finding specifically calls for — a `debug_assert`/test proving two `PrismChain`s with the same accepted-block set yield byte-identical `BlockImportParams` — has not been written (see fixplan item 1's own "not yet done" note).
+- **Status:** The timestamp hole is RESOLVED via B-1's fix. **A second, distinct hole in the same "one silent non-deterministic/non-reproducible input" category was found live on 2026-07-07 and is also RESOLVED**: the leader digest was attached via `BlockImportParams::post_digests`, which bypasses re-execution and so only worked on the authoring node's own trusted self-import. Any *other* node importing the identical block through normal Substrate sync re-executes it (`PrismBridgeVerifier`'s default `StateAction::Execute`), and `frame_executive`'s digest-count assert panicked, because `initialize_block` only preserves `DigestItem::PreRuntime` items and silently drops the `Other`-tagged one used here — meaning a node that ever fell behind could never safely rejoin. This is exactly the failure mode this finding predicted ("passes single-node testing and byte-diverges only under multi-node scrutiny that hasn't been run yet") — confirmed by running that scrutiny for the first time. Fixed by reclassifying the digest as `PreRuntime`, attached before block-building via `with_inherent_digests` instead of after via `post_digests`; re-verified live (kill/restart/reconnect/backfill a node, confirm no panic, confirm byte-identical hash). **Still open:** the broader choke-point assertion/test this finding specifically calls for — a `debug_assert`/test proving two `PrismChain`s with the same accepted-block set yield byte-identical `BlockImportParams` — has not been written as a standing test; the property has now been verified live but not automated.
 
 ### AF-5 (L): BuildLedger re-reads block bodies from RocksDB on every confirmation
 
@@ -212,14 +210,10 @@ These are the load-bearing design decisions the implementation got right — lis
 - **The one coupling that's slightly off** is AF-2 (confirmation policy leaked down into `prism-chain`). Everything else respects the guide's crate ownership.
 - **Bottom line on fidelity:** the implementation built the *right machine*. Its defects are a disconnected wire (AF-1), a mislabeled part (AF-2), a single leaky input (AF-4/B-1), and some parts sized for a prototype not production (AF-3, AF-5, B-7). None require re-architecting; all are "finish wiring what's already the correct design." That's a good place to be — the expensive, hard-to-reverse decisions (client-side consensus, crate boundaries, determinism-by-construction, vote-rollback correctness) were made correctly.
 
-## Updated fix order (folding in Part 2)
+## What's left (folding in Part 2)
 
-1. **B-1 / AF-4** — deterministic bridge timestamp + the two-node byte-identical test *and* the choke-point determinism assertion. (H)
-2. **A-1** — sr25519 behind a real feature, out of production wasm. (H)
-3. **AF-1** — wire `may_confirm` to an event-driven bridge wakeup; kills dead plumbing, cuts confirmation latency, reduces lock contention. Small, high leverage. (M)
-4. **B-2** — client-side rolling-window difficulty retarget. (M, the core paper-model gap)
-5. **AF-2** — move stage-1 confirmation into `prism-ledger`; then **B-3 → B-4** (real `δ_d`, wire stage-2 in). These three are one coherent work-stream. (M)
-6. **B-7 / AF-5** — persist DAG indices atomically; let the ledger traverse in-memory. Unblocks efficient restart and B5 pruning. (M)
-7. **B-6, B-9** — initial sync; two-miner stall. Before any serious multi-node network. (M)
-8. **AF-3** — finer-grained DAG concurrency. Only when measured to matter. (M, deferred)
-9. **B-5, B-8, B-10, A-2/A-3/A-4** — as convenient. (L)
+All numbered findings (B-1 through B-10, AF-1/AF-2/AF-4/AF-5, A-1/A-3/A-4-size) are resolved or partially addressed by design (B-3, B-7/AF-5's index-CF perf gap — see their `Status` lines). What's genuinely open:
+
+1. **Live-devnet verification** across the board — the single biggest remaining gap; see the fixplan doc.
+2. **AF-3** — finer-grained DAG concurrency. Only when measured to matter. (deferred by design)
+3. **B-10, A-4's auto-register half, full network-level adversarial run** — as convenient. (L)

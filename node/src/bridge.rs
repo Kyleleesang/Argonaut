@@ -62,24 +62,34 @@ fn previous_timestamp(client: &FullClient, parent_hash: <Block as BlockT>::Hash)
 
 /// Embedded in every bridge-built block's digest, for auditability: which
 /// confirmed Prism leader level and proposer hash this block corresponds to.
-/// Nothing in the runtime reads this back -- `DigestItem::Other` is a plain,
-/// unclaimed byte payload -- it exists purely so a block can be traced back
-/// to the Prism leader sequence that produced it.
+/// Nothing in the runtime reads this back -- it exists purely so a block can
+/// be traced back to the Prism leader sequence that produced it.
 #[derive(Encode, Decode)]
 pub struct LeaderDigest {
     pub level: u64,
     pub leader: H256,
 }
 
-/// Human-readable marker prefix so the raw digest bytes are recognizable when
-/// inspecting a block (e.g. via `state_getStorage`-style raw dumps), even
-/// though nothing parses it back out programmatically.
-pub const LEADER_DIGEST_PREFIX: &[u8; 4] = b"prsm";
+/// `ConsensusEngineId` for the leader digest. Must be `PreRuntime`, not
+/// `Other`: `Executive::initialize_block`'s `extract_pre_digest` (frame-executive)
+/// keeps only `PreRuntime` items from the header it's handed and drops
+/// everything else -- found live via a real cross-node bug, not by
+/// inspection. Self-authored blocks are imported with
+/// `StateAction::ApplyChanges`, which never calls back into the runtime, so
+/// an `Other` item survived fine on the originating node. But any *other*
+/// node receiving the same block via ordinary Substrate block-sync (e.g.
+/// after a restart, or a new node joining) goes through
+/// `PrismBridgeVerifier`'s default `StateAction::Execute`, which re-runs
+/// `execute_block` end to end -- and `final_checks`' `assert_eq!` on digest
+/// item counts trips the instant an `Other` item present in the received
+/// header doesn't come back out of `initialize_block`+`finalize()`,
+/// panicking (a wasm `unreachable` trap) on every single resync attempt.
+/// `PreRuntime` is exactly the variant `extract_pre_digest` preserves, so it
+/// survives identically whether the block is being authored or re-verified.
+pub const LEADER_DIGEST_ENGINE_ID: &[u8; 4] = b"prsm";
 
 fn leader_digest_item(level: u64, leader: H256) -> DigestItem {
-    let mut bytes = LEADER_DIGEST_PREFIX.to_vec();
-    bytes.extend(LeaderDigest { level, leader }.encode());
-    DigestItem::Other(bytes)
+    DigestItem::PreRuntime(*LEADER_DIGEST_ENGINE_ID, LeaderDigest { level, leader }.encode())
 }
 
 /// Verifier for blocks arriving over the network (self-authored blocks are
@@ -203,6 +213,9 @@ async fn build_and_import_block(
     let mut builder = BlockBuilderBuilder::new(&**client)
         .on_parent_block(parent_hash)
         .with_parent_block_number(parent_number)
+        .with_inherent_digests(sp_runtime::generic::Digest {
+            logs: vec![leader_digest_item(level, leader)],
+        })
         .build()?;
 
     // Deterministic timestamp (B-1 fix): every honest node that confirms the
@@ -251,13 +264,9 @@ async fn build_and_import_block(
     params.finalized = true;
     params.fork_choice = Some(ForkChoiceStrategy::Custom(true));
     params.state_action = StateAction::ApplyChanges(StorageChanges::Changes(built.storage_changes));
-    // `Executive::initialize_block` only preserves `PreRuntime` digest items
-    // from the header passed into block-building (see `extract_pre_digest`
-    // in frame-executive) -- an `Other` item set before building is silently
-    // dropped. Post-build digests merged in via `post_digests` (the same
-    // mechanism `sc-consensus-manual-seal`'s `ConsensusDataProvider` uses)
-    // survive into the actually-imported header.
-    params.post_digests.push(leader_digest_item(level, leader));
+    // The leader digest is already in `header` (set via `with_inherent_digests`
+    // above, before `build()`) -- see `LEADER_DIGEST_ENGINE_ID`'s doc comment
+    // for why it must be baked in at build time, not appended after.
 
     match block_import.import_block(params).await? {
         ImportResult::Imported(_) => Ok(()),

@@ -51,8 +51,8 @@ frame-system        = { git = "https://github.com/paritytech/polkadot-sdk", bran
 frame-benchmarking      = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412" }
 frame-benchmarking-cli  = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412" }
 
-argonaut-runtime = { version = "0.1.0", path = "../runtime", features = ["dev-signatures"] }
-argonaut-primitives-falcon = { path = "../primitives/falcon", features = ["dev-signatures"] }
+argonaut-runtime = { version = "0.1.0", path = "../runtime" }
+argonaut-primitives-falcon = { path = "../primitives/falcon" }
 argonaut-primitives-prism = { path = "../primitives/prism" }
 argonaut-prism-chain = { path = "../client/prism-chain" }
 argonaut-prism-db = { path = "../client/prism-db" }
@@ -79,3 +79,13 @@ substrate-build-script-utils = { git = "https://github.com/paritytech/polkadot-s
 default = []
 runtime-benchmarks = ["argonaut-runtime/runtime-benchmarks"]
 try-runtime = ["argonaut-runtime/try-runtime"]
+# A-1: off by default so a plain `cargo build --release` (and therefore the
+# production wasm blob -- substrate-wasm-builder mirrors whatever features
+# are active on argonaut-runtime's own native build into the wasm build it
+# spawns) never activates sr25519. Only `node/src/benchmarking.rs` (gated,
+# main.rs/lib.rs) and the `submit_transfer` example need this explicitly.
+dev-signatures = ["argonaut-runtime/dev-signatures", "argonaut-primitives-falcon/dev-signatures"]
+
+[[example]]
+name = "submit_transfer"
+required-features = ["dev-signatures"]

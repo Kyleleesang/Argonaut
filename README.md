@@ -1,231 +1,249 @@
-# Substrate Node Template
+# Argonaut
 
-[![Try on playground](https://img.shields.io/badge/Playground-Node_Template-brightgreen?logo=Parity%20Substrate)](https://docs.substrate.io/playground/) [![Matrix](https://img.shields.io/matrix/substrate-technical:matrix.org)](https://matrix.to/#/#substrate-technical:matrix.org)
+```
+###  ####   ####  ###  #   #  ###  #   # #####
+#   # #   # #     #   # ##  # #   # #   #   #
+#   # ####  # ### #   # # # # #   # #   #   #
+##### # #   #   # #   # #  ## ##### #   #   #
+#   # #  #  #   # #   # #   # #   # #   #   #
+#   # #   #  ####  ###  #   # #   #  ###    #
 
-A fresh FRAME-based [Substrate](https://www.substrate.io/) node, ready for hacking :rocket:
-
-## Getting Started
-
-Follow the steps below to get started with the Node Template, or get it up and running right from
-your browser in just a few clicks using
-the [Substrate Playground](https://docs.substrate.io/playground/) :hammer_and_wrench:
-
-### Using Nix
-
-Install [nix](https://nixos.org/) and optionally [direnv](https://github.com/direnv/direnv) and
-[lorri](https://github.com/nix-community/lorri) for a fully plug and play experience for setting up
-the development environment. To get all the correct dependencies activate direnv `direnv allow` and
-lorri `lorri shell`.
-
-### Rust Setup
-
-First, complete the [basic Rust setup instructions](./docs/rust-setup.md).
-
-### Run
-
-Use Rust's native `cargo` command to build and launch the template node:
-
-```sh
-cargo run --release -- --dev
+     a post-quantum secure, scalable blockchain for the decentralized internet
 ```
 
-### Build
+Argonaut is a [Substrate](https://substrate.io/)-based blockchain built around two ideas that
+don't normally travel together: **post-quantum signatures by default**, and **consensus that
+runs entirely client-side, on many parallel chains at once, decoupled from block execution** —
+built to scale as the settlement and data layer for a genuinely decentralized internet, not just
+a faster ledger.
 
-The `cargo run` command will perform an initial build. Use the following command to build the node
-without launching it:
+It's one machine, built up as a stock Substrate runtime with two working subsystems today and two
+more planned:
+
+| Subsystem | What it does | Status |
+|---|---|---|
+| Falcon-512 signatures + registry | Every account signs with a lattice-based, post-quantum signature scheme instead of sr25519/ed25519. An on-chain registry lets repeat senders drop the ~897-byte public key from the wire format. | **Done** — functional, tested, live-verified |
+| Prism consensus | Replaces Aura/GRANDPA with a client-side port of the [Prism](https://arxiv.org/abs/1810.08092) protocol: ~100 parallel voter chains vote on a proposer tree, decoupling transaction throughput from confirmation latency. Substrate becomes a deterministic *output* of Prism, not the consensus engine itself. | **Done** — functional, tested, live-verified |
+| Succinct proof aggregation | Aggregate many transactions' proofs into one succinct proof to shrink long-term chain history. | Scaffolded (`primitives/agg`, `pallets/agg-verify`, `client/aggregator`), not yet built out |
+| Decentralized storage | An [iroh](https://iroh.computer/)-backed data plane with an on-chain control plane (provider registry, deal lifecycle, availability proofs, payment channels). | Specified (`docs/IMPLEMENTATION_D_SPEC.md`), not yet started |
+
+This README covers building, running, and navigating the repository. For the detailed design
+and as-built behavior of the signature and consensus subsystems, see
+**[`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)**. The remaining two subsystems will get the
+same treatment once they're built out.
+
+---
+
+## How the pieces fit together
+
+```
+                                   ┌──────────────────────────┐
+                                   │   Users / wallets         │
+                                   │   (Falcon-512 keypairs)   │
+                                   └────────────┬─────────────┘
+                                                │ signs an extrinsic
+                                                │ (bootstrap or registry mode)
+                                                ▼
+ ┌────────────────────────────┐   ┌─────────────────────────────────────┐
+ │ Signatures & accounts        │   │ Consensus                             │
+ │ Falcon-512 + registry       │──▶│ Prism consensus (client-side)        │
+ │ (runtime + pallet)          │   │  mining · DAG · confirmation         │
+ └────────────────────────────┘   └────────────────┬──────────────────────┘
+                                                    │ confirmed leader level
+                                                    │ (ordered, deduped txs)
+                                                    ▼
+                                   ┌─────────────────────────────────────┐
+                                   │ node/src/bridge.rs                    │
+                                   │ the ONE place Prism meets Substrate    │
+                                   └────────────────┬──────────────────────┘
+                                                    ▼
+                                   ┌─────────────────────────────────────┐
+                                   │ Substrate runtime (FRAME)              │
+                                   │ pallet-balances, pallet-falcon-registry│
+                                   └─────────────────────────────────────┘
+
+                    ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─┐         ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┐
+                     Proof aggregation                Decentralized storage
+                     (planned)                          (planned)
+                    └ ─ ─ ─ ─ ─ ─ ─ ─ ─┘         └ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ┘
+```
+
+The binding architectural rule (see `docs/ARGONAUT_ARCHITECTURE_GUIDE.md` §3.1 and
+`docs/ARCHITECTURE.md`): **Prism decides transaction *order*; Substrate decides transaction
+*effect*.** Nothing about a transaction's validity or state effect is ever decided by Prism, and
+nothing about ordering is ever decided by Substrate/Aura-style block production — there is none.
+The bridge is a one-way funnel: confirmed Prism leader → exactly one Substrate block.
+
+---
+
+## Repository layout
+
+```
+Argonaut/
+├── node/                        binary crate: argonaut-node
+│   ├── src/
+│   │   ├── service.rs             wires the client, bridge, miner, and network together
+│   │   ├── bridge.rs               the one place Prism and Substrate touch
+│   │   ├── chain_spec.rs          --dev and --chain local genesis configs
+│   │   ├── cli.rs                 --prism-prune / --prism-k-prune + subcommands
+│   │   ├── command.rs             subcommand dispatch
+│   │   ├── keygen.rs               falcon-key subcommand (keystore generate/inspect)
+│   │   └── falcon_sign.rs          falcon-sign subcommand (bootstrap-mode offline signing)
+│   └── examples/
+│       ├── submit_transfer.rs           bootstrap-mode transaction builder
+│       └── submit_transfer_registry.rs  registry-mode transaction builder
+│
+├── runtime/                      FRAME runtime crate: argonaut-runtime
+│   └── src/
+│       ├── lib.rs                  construct_runtime!, SignedExtra tuple
+│       └── extensions.rs           CheckFalconSignature TransactionExtension
+│
+├── primitives/
+│   ├── falcon/                    signature types, host functions, dev-signatures gate
+│   ├── prism/                     block types, sortition, Merkle helpers, retargeting
+│   └── agg/                       proof aggregation, scaffolded, not built out yet
+│
+├── pallets/
+│   ├── falcon-registry/           on-chain Falcon public-key registry
+│   └── agg-verify/                proof aggregation, scaffolded, not built out yet
+│
+├── client/                        the Prism consensus engine — entirely client-side
+│   ├── prism-db/                    RocksDB column families, checkpoints, pruning storage
+│   ├── prism-chain/                 the DAG state machine (votes, fork-choice, orphans)
+│   ├── prism-miner/                  mining loop / template assembly / sortition
+│   ├── prism-network/                gossip + sync protocol over sc-network
+│   ├── prism-ledger/                 confirmation stages, BuildLedger, restart recovery
+│   └── aggregator/                  proof aggregation, scaffolded, not built out yet
+│
+├── docs/
+│   ├── ARCHITECTURE.md                  detailed design + as-built behavior of the machine
+│   ├── ARGONAUT_ARCHITECTURE_GUIDE.md   original design spec for the whole system
+│   └── IMPLEMENTATION_D_SPEC.md         decentralized storage subsystem's spec (not yet built)
+│
+└── scripts/                       devnet helper scripts (currently unmodified template boilerplate)
+```
+
+---
+
+## Building
+
+Argonaut pins one `polkadot-sdk` release (`stable2412`) for every workspace crate — see
+`docs/rust-setup.md` for toolchain setup, then:
 
 ```sh
 cargo build --release
 ```
 
-### Embedded Docs
+This builds the `argonaut-node` binary, including the wasm runtime. A full release build takes
+several minutes; `cargo check` / `cargo build` (debug) are much faster for iteration.
 
-Once the project has been built, the following command can be used to explore all parameters and
-subcommands:
+Run the test suite:
 
 ```sh
-./target/release/node-template -h
+cargo test --workspace
 ```
 
-## Run
+> **A note on trust in test output:** don't pipe `cargo test` through `tail` (or similar) and
+> trust the exit code — the pipe reports its own last command's exit code, not cargo's, and a
+> real test failure can silently read as success. Redirect to a file and check cargo's own exit
+> code, or read the `test result: ... FAILED` lines directly.
 
-The provided `cargo run` command will launch a temporary node and its state will be discarded after
-you terminate the process. After the project has been built, there are other ways to launch the
-node.
+## Running a single development node
 
-### Single-Node Development Chain
-
-This command will start the single-node development chain with non-persistent state:
-
-```bash
-./target/release/node-template --dev
+```sh
+./target/release/argonaut-node --dev --validator
 ```
 
-Purge the development chain's state:
+`--dev` uses a single well-known genesis with pre-funded dev accounts. `--validator` is required
+for this node to actually mine Prism blocks — without it, a node will sync and gossip but never
+produce anything of its own (mining is gated on `config.role.is_authority()` in
+`node/src/service.rs`).
 
-```bash
-./target/release/node-template purge-chain --dev
+Because Prism confirmation depends on ~100 independent voter chains reaching k-deep agreement
+(see `docs/ARCHITECTURE.md`), a **single** node confirms levels far more slowly than a
+healthy multi-node network — this is expected, not a bug.
+
+## Running a local two-node devnet
+
+Prism's request/response sync protocol is best-tested under the `libp2p` network backend in this
+`polkadot-sdk` pin.
+
+```sh
+# Node 1
+./target/release/argonaut-node --chain local --validator \
+  --base-path /tmp/argonaut/node1 --port 30401 --rpc-port 9945 \
+  --network-backend libp2p --rpc-cors all \
+  --node-key 0000000000000000000000000000000000000000000000000000000000000001
+
+# Node 2 (separate terminal) -- bootnode address uses node 1's fixed-node-key peer id
+./target/release/argonaut-node --chain local --validator \
+  --base-path /tmp/argonaut/node2 --port 30402 --rpc-port 9946 \
+  --network-backend libp2p --rpc-cors all \
+  --node-key 0000000000000000000000000000000000000000000000000000000000000002 \
+  --bootnodes /ip4/127.0.0.1/tcp/30401/p2p/12D3KooWEyoppNCUx8Yx66oV9fJnriXwCcXwDDUA2kj6vnc6iDEp
 ```
 
-Start the development chain with detailed logging:
+Fixed `--node-key`s make the peer ID deterministic across restarts, which is convenient for
+scripting bootnode addresses — don't reuse these two keys for anything beyond a local devnet.
 
-```bash
-RUST_BACKTRACE=1 ./target/release/node-template -ldebug --dev
+Check that both nodes agree on the chain, byte-for-byte:
+
+```sh
+curl -s -H "Content-Type: application/json" \
+  -d '{"id":1,"jsonrpc":"2.0","method":"chain_getBlockHash","params":[1]}' \
+  http://127.0.0.1:9945
+# compare against the same call against :9946 -- must match exactly
 ```
 
-> Development chain means that the state of our chain will be in a tmp folder while the nodes are
-> running. Also, **alice** account will be authority and sudo account as declared in the
-> [genesis state](https://github.com/substrate-developer-hub/substrate-node-template/blob/main/node/src/chain_spec.rs#L49).
-> At the same time the following accounts will be pre-funded:
-> - Alice
-> - Bob
-> - Alice//stash
-> - Bob//stash
+## Key management and transactions
 
-In case of being interested in maintaining the chain' state between runs a base path must be added
-so the db can be stored in the provided folder instead of a temporal one. We could use this folder
-to store different chain databases, as a different folder will be created per different chain that
-is ran. The following commands shows how to use a newly created folder as our db base path.
+```sh
+# Generate a Falcon-512 keystore (optionally passphrase-encrypted)
+./target/release/argonaut-node falcon-key generate --output alice.falcon.json
 
-```bash
-// Create a folder to use as the db base path
-$ mkdir my-chain-state
+# Inspect a keystore (prints the derived AccountId)
+./target/release/argonaut-node falcon-key inspect alice.falcon.json
 
-// Use of that folder to store the chain state
-$ ./target/release/node-template --dev --base-path ./my-chain-state/
-
-// Check the folder structure created inside the base path after running the chain
-$ ls ./my-chain-state
-chains
-$ ls ./my-chain-state/chains/
-dev
-$ ls ./my-chain-state/chains/dev
-db keystore network
+# Sign a payload offline (bootstrap mode)
+./target/release/argonaut-node falcon-sign alice.falcon.json <hex-payload>
 ```
 
+Two example binaries build and submit full transactions end to end against a running node:
 
-### Connect with Polkadot-JS Apps Front-end
-
-Once the node template is running locally, you can connect it with **Polkadot-JS Apps** front-end
-to interact with your chain. [Click
-here](https://polkadot.js.org/apps/#/explorer?rpc=ws://localhost:9944) connecting the Apps to your
-local node template.
-
-### Multi-Node Local Testnet
-
-If you want to see the multi-node consensus algorithm in action, refer to our
-[Simulate a network tutorial](https://docs.substrate.io/tutorials/get-started/simulate-network/).
-
-## Template Structure
-
-A Substrate project such as this consists of a number of components that are spread across a few
-directories.
-
-### Node
-
-A blockchain node is an application that allows users to participate in a blockchain network.
-Substrate-based blockchain nodes expose a number of capabilities:
-
-- Networking: Substrate nodes use the [`libp2p`](https://libp2p.io/) networking stack to allow the
-  nodes in the network to communicate with one another.
-- Consensus: Blockchains must have a way to come to
-  [consensus](https://docs.substrate.io/main-docs/fundamentals/consensus/) on the state of the
-  network. Substrate makes it possible to supply custom consensus engines and also ships with
-  several consensus mechanisms that have been built on top of
-  [Web3 Foundation research](https://research.web3.foundation/en/latest/polkadot/NPoS/index.html).
-- RPC Server: A remote procedure call (RPC) server is used to interact with Substrate nodes.
-
-There are several files in the `node` directory - take special note of the following:
-
-- [`chain_spec.rs`](./node/src/chain_spec.rs): A
-  [chain specification](https://docs.substrate.io/main-docs/build/chain-spec/) is a
-  source code file that defines a Substrate chain's initial (genesis) state. Chain specifications
-  are useful for development and testing, and critical when architecting the launch of a
-  production chain. Take note of the `development_config` and `testnet_genesis` functions, which
-  are used to define the genesis state for the local development chain configuration. These
-  functions identify some
-  [well-known accounts](https://docs.substrate.io/reference/command-line-tools/subkey/)
-  and use them to configure the blockchain's initial state.
-- [`service.rs`](./node/src/service.rs): This file defines the node implementation. Take note of
-  the libraries that this file imports and the names of the functions it invokes. In particular,
-  there are references to consensus-related topics, such as the
-  [block finalization and forks](https://docs.substrate.io/main-docs/fundamentals/consensus/#finalization-and-forks)
-  and other [consensus mechanisms](https://docs.substrate.io/main-docs/fundamentals/consensus/#default-consensus-models)
-  such as Aura for block authoring and GRANDPA for finality.
-
-After the node has been [built](#build), refer to the embedded documentation to learn more about the
-capabilities and configuration parameters that it exposes:
-
-```shell
-./target/release/node-template --help
+```sh
+cargo run --release --example submit_transfer -- alice.falcon.json
+cargo run --release --example submit_transfer_registry -- alice.falcon.json
 ```
 
-### Runtime
+`submit_transfer` uses bootstrap mode (signature + inline public key, no registry lookup needed).
+`submit_transfer_registry` uses registry mode (signature only, ~850 bytes smaller) — this
+requires the signer's key to already be registered on-chain via a bootstrap-mode
+`falcon_registry::register_key` call first.
 
-In Substrate, the terms
-"runtime" and "state transition function"
-are analogous - they refer to the core logic of the blockchain that is responsible for validating
-blocks and executing the state changes they define. The Substrate project in this repository uses
-[FRAME](https://docs.substrate.io/main-docs/fundamentals/runtime-intro/#frame) to construct a
-blockchain runtime. FRAME allows runtime developers to declare domain-specific logic in modules
-called "pallets". At the heart of FRAME is a helpful
-[macro language](https://docs.substrate.io/reference/frame-macros/) that makes it easy to
-create pallets and flexibly compose them to create blockchains that can address
-[a variety of needs](https://substrate.io/ecosystem/projects/).
+## Documentation map
 
-Review the [FRAME runtime implementation](./runtime/src/lib.rs) included in this template and note
-the following:
+- **[`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md)** — thorough, as-built design documentation
+  for the machine as it stands today: every crate's role, the Prism DAG structure, sortition,
+  confirmation, the Substrate bridge, networking, pruning, and the transaction lifecycle end to
+  end. Start here to understand *how the system actually works*.
+- **[`docs/ARGONAUT_ARCHITECTURE_GUIDE.md`](./docs/ARGONAUT_ARCHITECTURE_GUIDE.md)** — the
+  original design spec covering the whole system, including the subsystems not yet built. Useful
+  for intent and for their eventual scope.
+- **[`docs/IMPLEMENTATION_D_SPEC.md`](./docs/IMPLEMENTATION_D_SPEC.md)** — the decentralized
+  storage subsystem's detailed spec, ready to build from when its turn comes.
 
-- This file configures several pallets to include in the runtime. Each pallet configuration is
-  defined by a code block that begins with `impl $PALLET_NAME::Config for Runtime`.
-- The pallets are composed into a single runtime by way of the
-  [`construct_runtime!`](https://crates.parity.io/frame_support/macro.construct_runtime.html)
-  macro, which is part of the core
-  FRAME Support [system](https://docs.substrate.io/reference/frame-pallets/#system-pallets) library.
+## Project conventions worth knowing
 
-### Pallets
+- **Live-verify, don't just unit-test.** Every consensus-relevant bug found on this project so
+  far was found by actually running a multi-node devnet, not by a passing test suite. Unit tests
+  are necessary but treated as insufficient on their own for anything touching block production,
+  confirmation, or networking.
+- **One `polkadot-sdk` pin (`stable2412`) for the whole workspace.** Never mix release branches
+  in the same link unit.
+- **Prism consensus is entirely client-side.** `client/prism-*` never depends on the Substrate
+  runtime; the runtime never reaches back into Prism state. `node/src/bridge.rs` is the only
+  seam, and it is one-directional: confirmed leader → Substrate block, never the other way.
 
-The runtime in this project is constructed using many FRAME pallets that ship with the
-[core Substrate repository](https://github.com/paritytech/substrate/tree/master/frame) and a
-template pallet that is [defined in the `pallets`](./pallets/template/src/lib.rs) directory.
+## License
 
-A FRAME pallet is compromised of a number of blockchain primitives:
-
-- Storage: FRAME defines a rich set of powerful
-  [storage abstractions](https://docs.substrate.io/main-docs/build/runtime-storage/) that makes
-  it easy to use Substrate's efficient key-value database to manage the evolving state of a
-  blockchain.
-- Dispatchables: FRAME pallets define special types of functions that can be invoked (dispatched)
-  from outside of the runtime in order to update its state.
-- Events: Substrate uses [events and errors](https://docs.substrate.io/main-docs/build/events-errors/)
-  to notify users of important changes in the runtime.
-- Errors: When a dispatchable fails, it returns an error.
-- Config: The `Config` configuration interface is used to define the types and parameters upon
-  which a FRAME pallet depends.
-
-### Run in Docker
-
-First, install [Docker](https://docs.docker.com/get-docker/) and
-[Docker Compose](https://docs.docker.com/compose/install/).
-
-Then run the following command to start a single node development chain.
-
-```bash
-./scripts/docker_run.sh
-```
-
-This command will firstly compile your code, and then start a local development network. You can
-also replace the default command
-(`cargo build --release && ./target/release/node-template --dev --ws-external`)
-by appending your own. A few useful ones are as follow.
-
-```bash
-# Run Substrate node without re-compiling
-./scripts/docker_run.sh ./target/release/node-template --dev --ws-external
-
-# Purge the local dev chain
-./scripts/docker_run.sh ./target/release/node-template purge-chain --dev
-
-# Check whether the code is compilable
-./scripts/docker_run.sh cargo check
-```
+Public domain — see [`LICENSE`](./LICENSE) (Unlicense).

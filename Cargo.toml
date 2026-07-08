@@ -6,6 +6,7 @@ members = [
     "primitives/falcon",
     "primitives/prism",
     "primitives/agg",
+    "primitives/storage",
     "pallets/falcon-registry",
     "pallets/agg-verify",
     "client/prism-db",
@@ -31,6 +32,11 @@ frame-system = { git = "https://github.com/paritytech/polkadot-sdk", branch = "s
 parity-scale-codec = { version = "3.7", default-features = false, features = ["derive"] }
 scale-info = { version = "2.11", default-features = false, features = ["derive"] }
 blake3 = { version = "1.5", default-features = false }
+# Implementation D (storage): bao-tree slice verification (native host-fn body
+# only) + Reed-Solomon erasure coding (client-side encode/decode). iroh pins are
+# added later at the D3 daemon milestone (see docs/IMPLEMENTATION_D_SPEC.md D.15).
+bao-tree = { version = "0.16", default-features = false }
+reed-solomon-simd = "3"
 fn-dsa = { version = "0.2", default-features = false }
 fn-dsa-sign = { version = "0.2", default-features = false }
 fn-dsa-vrfy = { version = "0.2", default-features = false }

@@ -1,14 +1,20 @@
+#[cfg(feature = "dev-signatures")]
+use crate::benchmarking::{inherent_benchmark_data, RemarkBuilder, TransferKeepAliveBuilder};
 use crate::{
-    benchmarking::{inherent_benchmark_data, RemarkBuilder, TransferKeepAliveBuilder},
     chain_spec,
     cli::{Cli, Subcommand},
     service,
 };
-use frame_benchmarking_cli::{BenchmarkCmd, ExtrinsicFactory, SUBSTRATE_REFERENCE_HARDWARE};
-use argonaut_runtime::{opaque::Block, EXISTENTIAL_DEPOSIT};
+use frame_benchmarking_cli::{BenchmarkCmd, SUBSTRATE_REFERENCE_HARDWARE};
+#[cfg(feature = "dev-signatures")]
+use frame_benchmarking_cli::ExtrinsicFactory;
+use argonaut_runtime::opaque::Block;
+#[cfg(feature = "dev-signatures")]
+use argonaut_runtime::EXISTENTIAL_DEPOSIT;
 use clap::Parser;
 use sc_cli::SubstrateCli;
 use sc_service::PartialComponents;
+#[cfg(feature = "dev-signatures")]
 use sp_keyring::Sr25519Keyring;
 
 impl SubstrateCli for Cli {
@@ -118,6 +124,13 @@ pub fn run() -> sc_cli::Result<()> {
                         let storage = backend.expose_storage();
                         cmd.run(config, client, db, storage)
                     },
+                    #[cfg(not(feature = "dev-signatures"))]
+                    BenchmarkCmd::Overhead(_) => Err(
+                        "Overhead benchmarking signs extrinsics via sr25519 and needs \
+                         `--features dev-signatures`."
+                            .into(),
+                    ),
+                    #[cfg(feature = "dev-signatures")]
                     BenchmarkCmd::Overhead(cmd) => {
                         let PartialComponents { client, .. } = service::new_partial(&config)?;
                         let ext_builder = RemarkBuilder::new(client.clone());
@@ -130,6 +143,13 @@ pub fn run() -> sc_cli::Result<()> {
                             false,
                         )
                     },
+                    #[cfg(not(feature = "dev-signatures"))]
+                    BenchmarkCmd::Extrinsic(_) => Err(
+                        "Extrinsic benchmarking signs extrinsics via sr25519 and needs \
+                         `--features dev-signatures`."
+                            .into(),
+                    ),
+                    #[cfg(feature = "dev-signatures")]
                     BenchmarkCmd::Extrinsic(cmd) => {
                         let PartialComponents { client, .. } = service::new_partial(&config)?;
                         let ext_factory = ExtrinsicFactory(vec![

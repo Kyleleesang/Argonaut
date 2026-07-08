@@ -1,3 +1,4 @@
+#[cfg(feature = "dev-signatures")]
 pub mod benchmarking;
 pub mod bridge;
 pub mod chain_spec;
