@@ -480,18 +480,18 @@ Rules for the implementing model, restate in every prompt: SCALE everywhere; no 
 > replaced with an epoch-snapshotted block hash because the runtime cannot read
 > the bridge's leader post-digest).
 
-### 9.0 Feasibility & library inventory (verified June 2026)
+### 9.0 Feasibility & library inventory (verified June 2026; iroh/iroh-blobs/bao-tree rows re-verified July 2026)
 
 | Need | Library | Status / Notes |
 |---|---|---|
-| P2P transport, hole-punching, discovery | `iroh` (n0-computer) | Canary series approaching 1.0; running in production on hundreds of thousands of devices. Pin one version. |
-| Content-addressed blob transfer, BLAKE3 verified streaming | `iroh-blobs` | **Two lines exist:** 0.35 (older API, designated production-quality) and 0.9x (new API, canary toward 1.0, explicitly "not yet production quality"). **Decision: build against the 0.9x line, pinned** — its provider-events API (per-request intercept/allow by hash and node id) is exactly what the paid-retrieval gate needs; accept the API-churn risk with a thin wrapper layer. Note the maintainers' own advice that persistent-store users may prefer to wait a release or two — mitigate by pinning + integration tests. |
-| Verified slice proofs (the on-chain proof primitive) | `bao-tree` (^1.x, dependency of iroh-blobs) | Stable, standalone. Encodes/verifies byte-range slices of a blob against its BLAKE3 root. Outboards are stored at 16 KiB chunk-group granularity, but **slice verification works at 1024-byte chunk granularity against the same root** — the root hash is granularity-independent. This is what keeps on-chain proofs ~2.5 KB. |
+| P2P transport, hole-punching, discovery | `iroh` (n0-computer) | **Stable 1.0 released 2026-06-15** (1.0.2 as of 2026-07-06) with a wire-protocol stability commitment; running in production on millions of devices. Pin one version (`=1.0.x`). |
+| Content-addressed blob transfer, BLAKE3 verified streaming | `iroh-blobs` | **Two lines exist:** 0.35 (older API, designated production-quality, tied to pre-1.0 iroh) and 0.10x (new API — 0.103.0 builds against stable `iroh ^1.0`, but the maintainers still label it "not yet production quality"). **Decision: build against the 0.10x line, pinned** — its provider-events API (per-request intercept/allow by hash and node id) is exactly what the paid-retrieval gate needs, and it is the only line that rides on stable iroh 1.0; accept the API-churn risk with a thin wrapper layer, mitigated by pinning + integration tests. Re-check the production-quality label at each phase boundary — it is expected to graduate. |
+| Verified slice proofs (the on-chain proof primitive) | `bao-tree` (^0.16, dependency of iroh-blobs; 0.16.0 is latest — earlier "^1.x" note here was wrong) | Stable, standalone. Encodes/verifies byte-range slices of a blob against its BLAKE3 root. Outboards are stored at 16 KiB chunk-group granularity, but **slice verification works at 1024-byte chunk granularity against the same root** — the root hash is granularity-independent. This is what keeps on-chain proofs ~2.5 KB. |
 | BLAKE3 with subtree hashing | `blake3` ≥ 1.8.0 | Subtree functionality upstreamed (the old `iroh-blake3` fork is deprecated). Already an Argonaut dependency. |
 | Erasure coding | `reed-solomon-simd` (preferred; O(n log n), SIMD) or `reed-solomon-erasure` | Both stable on crates.io. |
 | Everything on-chain | pallets per §2/§4 patterns; Prism leader hashes as randomness beacon | Already specified in this document. |
 
-**Feasibility verdict: fully buildable today.** No missing primitives. The only research-flavored piece — proof-of-physical-replication — is deliberately designed *out* (§9.1). Risk concentrates in iroh-blobs 0.9x API churn (wrapper-isolate it) and in economic-parameter tuning (testnet problem, not a code problem).
+**Feasibility verdict: fully buildable today.** No missing primitives. The only research-flavored piece — proof-of-physical-replication — is deliberately designed *out* (§9.1). Risk concentrates in iroh-blobs 0.10x API churn (wrapper-isolate it; core iroh is now stable 1.0) and in economic-parameter tuning (testnet problem, not a code problem).
 
 ### 9.1 Binding design decisions
 
@@ -614,7 +614,7 @@ Components (single tokio process):
 
 | Risk | Severity | Mitigation |
 |---|---|---|
-| iroh / iroh-blobs pre-1.0 API churn | M | Pin exact versions; all iroh calls behind internal traits (§9.7); upgrade only at milestone boundaries |
+| iroh-blobs pre-1.0 API churn (core iroh is stable 1.0 since 2026-06) | M | Pin exact versions (`iroh =1.0.2`, `iroh-blobs =0.103.0`); all iroh calls behind internal traits (§9.7); upgrade only at milestone boundaries |
 | Outsourced storage (provider keeps shard on S3) | Accepted | Product sells *availability*, not physical locality (§9.1 decision 2); tight proof deadlines make cold storage uneconomic anyway |
 | Beacon grinding by Prism miners | L→M as deal value grows | Documented v1 acceptance + upgrade path (external beacon/VDF) |
 | Client disappears before shard handoff completes | L | `Assigning` timeouts re-list shards; escrow refund path |
@@ -626,7 +626,32 @@ Components (single tokio process):
 
 - **P-D1:** "Implement §9.2 `primitives/storage` (types + `BaoProof` host function over the `bao-tree` crate) and an `argonaut-store encode` CLI using `reed-solomon-simd`, with the D1 acceptance tests. Enforce MAX_PROOF_BYTES before host dispatch."
 - **P-D2:** "Implement §9.3 `pallets/provider-registry` and §9.4 `pallets/storage-deals` exactly as specified, including the deal state machine enum, escrow vesting math, and D2 tests. Constants in `parameters.rs`."
-- **P-D3:** "Implement §9.5 `pallets/storage-proofs` (deterministic selection formula verbatim, `report_missed` with bond, `ProofPayload` enum with `Aggregated` variant stubbed) and the §9.7 provider daemon with iroh-blobs pinned at <fill in>, all iroh calls behind internal traits. Deliver D3."
+- **P-D3:** "Implement §9.5 `pallets/storage-proofs` (deterministic selection formula verbatim, `report_missed` with bond, `ProofPayload` enum with `Aggregated` variant stubbed) and the §9.7 provider daemon with iroh-blobs pinned at =0.103.0 (iroh =1.0.2), all iroh calls behind internal traits. Deliver D3."
 - **P-D4:** "Implement §9.6 `pallets/payment-channels` + SDK `fetch` with per-stride vouchers over iroh-blobs verified streaming, and the §9.8 `repair` flow. Deliver D4–D5."
 
 **Build-order amendment to §6:** D1–D2 depend only on Phase 0 + A (they run fine under Aura); D3 onward wants B3 (needs the leader-hash beacon — for pre-B3 development, stub the beacon with the Substrate block hash and swap at B3). D is independent of C, but C's `AggVerify` pattern is the template for D's v2 proof bundles.
+
+## 10. Implementation E — Production Bootstrap (0→1): Pallets & Utilities
+
+> **Implementers: read `docs/IMPLEMENTATION_E_SPEC.md`.** E covers everything
+> needed to take the chain from the current devnet runtime to a production
+> mainnet: genesis/token identity and chain-spec hardening (E0), benchmarked
+> weights and a real fee curve (E1), governance to retire sudo (E2), account
+> utilities (E3), ink! smart contracts (E4), node/ops/release engineering
+> (E5), and the Falcon signing/ecosystem tooling gap (E6). It supersedes
+> `docs/POTENTIAL_PALLET_INTEGRATIONS.md` (the analysis menu) as the
+> committed plan. E is orthogonal to D and respects the same binding rule:
+> Prism decides order, Substrate decides effect — no session/staking/
+> authorship/finality pallets, ever.
+
+## 11. Application layer — dApp catalog
+
+> **See `docs/DAPP_CATALOG_SPEC.md`.** Which dApps Argonaut is uniquely good
+> at (scored against its three differentiators: post-quantum signatures,
+> no-reorg Prism finality, native verifiable storage with paid retrieval) and
+> how each is built as ink! contracts + off-chain daemons on the D/E
+> primitives. Tier 1: Anchor (PQ notarization), Keystone (key/cert
+> transparency), Press (paid content — the D-stack flagship). Adds no runtime
+> pallets; apps live in a workspace-excluded `apps/` directory. Includes an
+> anti-catalog (oracle DeFi, bridges, randomness-critical apps — blocked on
+> PQ/beacon grounds, not taste).

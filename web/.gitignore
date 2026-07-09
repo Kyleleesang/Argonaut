@@ -1,0 +1,12 @@
+node_modules
+dist
+.DS_Store
+*.local
+
+# Texture / HDRI assets are large and licensed separately — do not commit the
+# binaries. Keep public/textures/ and public/hdr/ contents out of git; the
+# sources + license notes live in ASSETS.md. Commit only small placeholders if any.
+public/textures/*
+public/hdr/*
+!public/textures/.gitkeep
+!public/hdr/.gitkeep

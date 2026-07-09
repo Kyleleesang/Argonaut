@@ -1,10 +1,11 @@
 # Potential Pallet & Package Integrations for Production Readiness
 
-**Status: analysis / roadmap (2026-07-08).** This document catalogues the Substrate
-pallets and supporting packages Argonaut would need to become a live,
-production-ready blockchain. It is a *menu with rationale*, not a committed plan —
-nothing here has been implemented. Priorities and the Argonaut-specific caveats
-matter as much as the list itself.
+**Status: analysis / roadmap (2026-07-08) — superseded as a plan by
+`docs/IMPLEMENTATION_E_SPEC.md` (2026-07-09), the committed, milestone-sequenced
+version. Where the two disagree, the E spec wins.** This document remains the
+*menu with rationale* — useful for the options that were considered and why —
+but nothing here has been implemented, and implementers should work from the
+E spec.
 
 Read `docs/ARCHITECTURE.md` first for how the chain actually works today. The
 single most important fact for everything below:
