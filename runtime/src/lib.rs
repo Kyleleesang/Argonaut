@@ -11,6 +11,7 @@ mod tests;
 
 use frame_support::{
     construct_runtime, parameter_types,
+    PalletId,
     traits::{ConstU128, ConstU32, ConstU64, ConstU8},
     weights::{
         constants::{BlockExecutionWeight, ExtrinsicBaseWeight, RocksDbWeight, WEIGHT_REF_TIME_PER_SECOND},
@@ -209,6 +210,83 @@ impl pallet_falcon_registry::Config for Runtime {
     type KeyDeposit = ConstU128<FALCON_KEY_DEPOSIT>;
 }
 
+// ── Implementation D: decentralized storage platform (spec §D.8) ──────────────
+//
+// Four pallets wired via the interface traits in `argonaut-primitives-storage`
+// (no crate cycle): ProviderRegistry ⇄ StorageDeals ⇄ StorageProofs. Constants
+// come from each pallet's `parameters` module; balance-denominated ones are
+// scaled by the existential deposit here. The `BaoProof` host function is
+// registered in `node/src/service.rs` (done in D1).
+
+parameter_types! {
+    pub const StorageMinStake: Balance =
+        pallet_provider_registry::parameters::MIN_STAKE_ED_MULTIPLE * EXISTENTIAL_DEPOSIT;
+    /// Sub-account custodying slashed repair bounties (`repair_pot`).
+    pub const StorageDealsPalletId: PalletId = PalletId(*b"argnstor");
+    pub const AssignTimeoutEpochs: u32 =
+        pallet_storage_deals::parameters::ASSIGN_TIMEOUT_EPOCHS;
+    pub const ActivationTimeoutEpochs: u32 =
+        pallet_storage_deals::parameters::ACTIVATION_TIMEOUT_EPOCHS;
+    pub const CloseGraceEpochs: u32 = pallet_storage_deals::parameters::CLOSE_GRACE_EPOCHS;
+    pub const CancelFeeEpochs: u32 = pallet_storage_deals::parameters::CANCEL_FEE_EPOCHS;
+    pub const StorageEpochDuration: BlockNumber =
+        pallet_storage_proofs::parameters::EPOCH_DURATION_BLOCKS;
+    pub const StorageBeaconDelay: BlockNumber =
+        pallet_storage_proofs::parameters::BEACON_DELAY_BLOCKS;
+    pub const StorageBeaconRetention: u32 =
+        pallet_storage_proofs::parameters::BEACON_RETENTION_EPOCHS;
+    pub const StorageReportWindow: u32 =
+        pallet_storage_proofs::parameters::REPORT_WINDOW_EPOCHS;
+    pub const StorageMissedProofSlash: Balance =
+        pallet_storage_proofs::parameters::MISSED_PROOF_SLASH_ED_MULTIPLE * EXISTENTIAL_DEPOSIT;
+    pub const StorageFaultSlash: Balance =
+        pallet_storage_proofs::parameters::FAULT_SLASH_ED_MULTIPLE * EXISTENTIAL_DEPOSIT;
+    pub const StorageMaxConsecutiveMisses: u8 =
+        pallet_storage_proofs::parameters::MAX_CONSECUTIVE_MISSES;
+    pub const ChannelMinDeposit: Balance =
+        pallet_payment_channels::parameters::MIN_DEPOSIT_ED_MULTIPLE * EXISTENTIAL_DEPOSIT;
+}
+
+impl pallet_provider_registry::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type Currency = Balances;
+    type MinStake = StorageMinStake;
+}
+
+impl pallet_storage_deals::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type Currency = Balances;
+    type Providers = ProviderRegistry;
+    type Epochs = StorageProofs;
+    type Proofs = StorageProofs;
+    type PalletId = StorageDealsPalletId;
+    type AssignTimeoutEpochs = AssignTimeoutEpochs;
+    type ActivationTimeoutEpochs = ActivationTimeoutEpochs;
+    type CloseGraceEpochs = CloseGraceEpochs;
+    type CancelFeeEpochs = CancelFeeEpochs;
+}
+
+impl pallet_storage_proofs::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type Currency = Balances;
+    type Deals = StorageDeals;
+    type Providers = ProviderRegistry;
+    type EpochDuration = StorageEpochDuration;
+    type BeaconDelay = StorageBeaconDelay;
+    type BeaconRetention = StorageBeaconRetention;
+    type ReportWindowEpochs = StorageReportWindow;
+    type MissedProofSlash = StorageMissedProofSlash;
+    type FaultSlash = StorageFaultSlash;
+    type MaxConsecutiveMisses = StorageMaxConsecutiveMisses;
+}
+
+impl pallet_payment_channels::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type Currency = Balances;
+    type KeyProvider = FalconRegistry;
+    type MinDeposit = ChannelMinDeposit;
+}
+
 // ── Construct runtime ─────────────────────────────────────────────────────────
 
 construct_runtime!(
@@ -220,6 +298,11 @@ construct_runtime!(
         FalconRegistry: pallet_falcon_registry,
         TransactionPayment: pallet_transaction_payment,
         Sudo: pallet_sudo,
+        // Implementation D: decentralized storage platform (§D.8).
+        ProviderRegistry: pallet_provider_registry,
+        StorageDeals: pallet_storage_deals,
+        StorageProofs: pallet_storage_proofs,
+        PaymentChannels: pallet_payment_channels,
     }
 );
 

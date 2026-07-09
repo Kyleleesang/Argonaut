@@ -59,10 +59,11 @@ document for what to actually type.
 6. Native-only crypto (`bao-tree` slice verification) goes behind a
    `#[runtime_interface]` host function, same as Falcon.
 7. Every iroh / iroh-blobs API call in the daemon/SDK lives behind the internal
-   traits in D.9.2 (one module, ≤ ~500 lines). Pin exact iroh + iroh-blobs
-   versions (`=x.y.z`) at implementation time; record the pins in the crate
-   README. If a pinned API differs from the sketches here, keep the trait
-   signatures and adapt the internals.
+   traits in D.9.2 (one module, ≤ ~500 lines). Pins chosen July 2026:
+   `iroh = "=1.0.2"` (stable 1.0 line), `iroh-blobs = "=0.103.0"` (first
+   new-API release built against iroh ^1.0; see D.2). Record the pins in the
+   crate README. If a pinned API differs from the sketches here, keep the
+   trait signatures and adapt the internals.
 8. Placeholder weights (`Weight::from_parts(10_000, 0)`) like the existing
    pallets; benchmarking files can be stubs. Do not invent a weight system.
 9. Constants: each pallet gets `parameters.rs` (pure `pub const` defaults) and
@@ -86,10 +87,14 @@ client/argonaut-store      # client SDK lib + CLI binary (D.10)
 New `[workspace.dependencies]`:
 
 ```toml
-bao-tree = { version = "1", default-features = false }
+bao-tree = { version = "0.16", default-features = false }  # already in root Cargo.toml
 reed-solomon-simd = "3"
-iroh = "=<pin latest at implementation time>"
-iroh-blobs = "=<pin latest 0.9x at implementation time>"
+# Verified July 2026: iroh 1.0 is stable (1.0.2 latest); iroh-blobs 0.103.0 is
+# the first of the new-API line built against iroh ^1.0 (still labeled "not yet
+# production quality" by maintainers — see guide §9.0). Re-check for newer
+# patch releases at implementation time, but stay on these major/minor lines.
+iroh = "=1.0.2"
+iroh-blobs = "=0.103.0"
 jsonrpsee = { version = "0.24", features = ["ws-client", "http-client"] }
 ```
 

@@ -1,0 +1,22 @@
+[package]
+name = "argonaut-store"
+version = "0.1.0"
+edition = "2021"
+license = "Unlicense"
+description = "Argonaut storage client SDK + CLI (Implementation D): Reed-Solomon encode/decode, manifests"
+
+[lib]
+name = "argonaut_store"
+path = "src/lib.rs"
+
+[[bin]]
+name = "argonaut-store"
+path = "src/main.rs"
+
+[dependencies]
+argonaut-primitives-storage = { path = "../../primitives/storage" }
+reed-solomon-simd = { workspace = true }
+parity-scale-codec = { workspace = true, features = ["std"] }
+blake3 = { workspace = true, features = ["std"] }
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"

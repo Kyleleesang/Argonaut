@@ -1,0 +1,44 @@
+[package]
+name = "pallet-storage-deals"
+version = "0.1.0"
+edition = "2021"
+license = "Unlicense"
+description = "Implementation D: storage-deal lifecycle — escrow, assignment, activation, vesting, faults"
+
+[dependencies]
+parity-scale-codec = { workspace = true }
+scale-info = { workspace = true }
+frame-support = { workspace = true }
+frame-system = { workspace = true }
+sp-core = { workspace = true }
+sp-runtime = { workspace = true }
+sp-std = { workspace = true }
+argonaut-primitives-storage = { path = "../../primitives/storage", default-features = false }
+frame-benchmarking = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412", default-features = false, optional = true }
+
+[dev-dependencies]
+sp-io = { workspace = true, features = ["std"] }
+pallet-balances = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412" }
+pallet-provider-registry = { path = "../provider-registry" }
+# Real bao slices in tests (D.12: no proof mocking) — native encode side,
+# same default-features=false setup the primitives crate's bao test uses.
+bao-tree = { workspace = true }
+
+[features]
+default = ["std"]
+std = [
+    "parity-scale-codec/std",
+    "scale-info/std",
+    "frame-support/std",
+    "frame-system/std",
+    "sp-core/std",
+    "sp-runtime/std",
+    "sp-std/std",
+    "argonaut-primitives-storage/std",
+    "frame-benchmarking?/std",
+]
+runtime-benchmarks = [
+    "frame-benchmarking/runtime-benchmarks",
+    "frame-support/runtime-benchmarks",
+    "frame-system/runtime-benchmarks",
+]

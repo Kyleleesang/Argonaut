@@ -9,12 +9,17 @@ members = [
     "primitives/storage",
     "pallets/falcon-registry",
     "pallets/agg-verify",
+    "pallets/provider-registry",
+    "pallets/storage-deals",
+    "pallets/storage-proofs",
+    "pallets/payment-channels",
     "client/prism-db",
     "client/prism-chain",
     "client/prism-miner",
     "client/prism-network",
     "client/prism-ledger",
     "client/aggregator",
+    "client/argonaut-store",
 ]
 
 [profile.release]

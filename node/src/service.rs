@@ -20,8 +20,12 @@ use std::{
 };
 
 /// Host function set for the wasm executor.
-type HostFunctions =
-    (sp_io::SubstrateHostFunctions, argonaut_primitives_falcon::falcon_crypto::HostFunctions);
+type HostFunctions = (
+    sp_io::SubstrateHostFunctions,
+    argonaut_primitives_falcon::falcon_crypto::HostFunctions,
+    // Implementation D: native bao-tree slice verification (D.3.3).
+    argonaut_primitives_storage::bao_proof::HostFunctions,
+);
 
 pub type FullClient =
     sc_service::TFullClient<Block, RuntimeApi, sc_executor::WasmExecutor<HostFunctions>>;

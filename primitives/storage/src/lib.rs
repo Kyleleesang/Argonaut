@@ -144,6 +144,91 @@ pub fn voucher_signing_payload(v: &Voucher) -> [u8; 32] {
     *h.finalize().as_bytes()
 }
 
+// ── Cross-pallet interface traits (D.4 / D.6) ───────────────────────────────
+//
+// These live here — the neutral shared crate — rather than in any one pallet, so
+// that `storage-deals` and `storage-proofs` can reference each other's contracts
+// *by trait* without a cyclic crate dependency (Cargo forbids those). Each pallet
+// depends only on this crate; the runtime wires the concrete `Pallet` types into
+// the associated `Config` slots. Deliberately frame-free (no `DispatchResult`,
+// no `frame_support`) so this crate stays lightweight for the daemon/SDK too.
+
+pub mod interfaces {
+    use super::{DealId, EpochIndex, ShardIndex};
+
+    /// Implemented by `pallet-provider-registry`; consumed by `storage-deals`
+    /// and `storage-proofs` via a `Config` associated type. All mutation happens
+    /// inside the registry's own storage; callers only signal transitions.
+    pub trait ProviderInterface<AccountId, Balance> {
+        /// Is the provider registered and `Active` (not deregistering)?
+        fn is_active(who: &AccountId) -> bool;
+        /// Stake not currently locked against active assignments (`stake − locked`).
+        fn free_stake(who: &AccountId) -> Balance;
+        /// Repatriate up to `amount` of the provider's reserved stake to
+        /// `beneficiary` as *free* balance; decrement the tracked stake. Returns
+        /// the amount actually moved (may be `< amount` if stake ran short).
+        fn slash(who: &AccountId, amount: Balance, beneficiary: &AccountId) -> Balance;
+        /// Record a new assignment carrying `escrow_at_risk`. Enforces the §9.3
+        /// 2× rule (`stake ≥ 2 · (locked + escrow_at_risk)`); `Err(())` if it
+        /// would break, or the provider is not active.
+        fn note_assignment_started(who: &AccountId, escrow_at_risk: Balance) -> Result<(), ()>;
+        /// Release an assignment's `escrow_at_risk` from the locked total and
+        /// decrement `active_assignments`. Saturating; never fails.
+        fn note_assignment_ended(who: &AccountId, escrow_at_risk: Balance);
+        /// Bump the lifetime informational fault counter.
+        fn note_fault(who: &AccountId);
+    }
+
+    /// Implemented by `storage-proofs` (which owns epoch math and the beacon map);
+    /// consumed by `storage-deals` for activation-window checks. `beacon` returns
+    /// `None` for pre-genesis / pruned epochs.
+    pub trait EpochProvider {
+        fn current_epoch() -> EpochIndex;
+        fn beacon(epoch: EpochIndex) -> Option<[u8; 32]>;
+    }
+
+    /// Read-only view `storage-proofs` needs to validate a proof or miss report,
+    /// returned only when the deal is chargeable (`Active`/`Degraded`) and the
+    /// assignment exists and is `Activated`. Frame-free / balance-free by design.
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    pub struct ProofContext<AccountId> {
+        pub provider: AccountId,
+        pub client: AccountId,
+        pub shard_root: [u8; 32],
+        pub shard_size: u64,
+        pub challenge_rate_ppm: u32,
+        pub end_epoch: EpochIndex,
+    }
+
+    /// Implemented by `storage-deals`; consumed by `storage-proofs` (read side).
+    pub trait DealInspector<AccountId> {
+        fn proof_context(deal: DealId, shard: ShardIndex) -> Option<ProofContext<AccountId>>;
+    }
+
+    /// Implemented by `storage-proofs`; consumed by `storage-deals::close_deal`
+    /// to prune all proof/miss records for a closed deal's `n` shards (D.6.5).
+    pub trait ProofPruner {
+        fn on_deal_closed(deal: DealId, n: ShardIndex);
+    }
+
+    /// Implemented by `storage-deals`; consumed by `storage-proofs` (fault side).
+    /// `storage-proofs` first repatriates the `FaultSlash` into `deals_account()`,
+    /// then calls `on_shard_faulted` to book the bounty and transition the deal.
+    pub trait DealFaultHandler<AccountId, Balance> {
+        /// Pallet sub-account custodying slashed repair bounties (slash target).
+        fn deals_account() -> AccountId;
+        /// Mark `(deal, shard)` `Faulted`, credit `repair_bounty` to the deal's
+        /// `repair_pot`, and escalate deal state (`Degraded`, or `Lost` if
+        /// surviving shards `< k`).
+        fn on_shard_faulted(
+            deal: DealId,
+            shard: ShardIndex,
+            provider: &AccountId,
+            repair_bounty: Balance,
+        );
+    }
+}
+
 // ── BaoProof host function (D.3.3) ──────────────────────────────────────────
 
 /// Native bao-tree slice verification. Register `bao_proof::HostFunctions` in the

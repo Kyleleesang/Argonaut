@@ -78,7 +78,7 @@ fn encode_chunk(data: &[u8], chunk: u64) -> ([u8; 32], alloc::vec::Vec<u8>) {
         ChunkRanges,
     };
     let ob = PreOrderMemOutboard::create(data, BlockSize::ZERO);
-    let root = *ob.root().as_bytes();
+    let root = *ob.root.as_bytes(); // `root` is a field in bao-tree 0.16, not a method
     let ranges = ChunkRanges::from(ChunkNum(chunk)..ChunkNum(chunk + 1));
     let mut slice = alloc::vec::Vec::new();
     encode_ranges_validated(data, &ob, ranges.as_ref(), &mut slice).unwrap();

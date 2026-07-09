@@ -28,7 +28,12 @@ pallet-timestamp       = { git = "https://github.com/paritytech/polkadot-sdk", b
 pallet-transaction-payment     = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412", default-features = false }
 pallet-transaction-payment-rpc-runtime-api = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412", default-features = false }
 pallet-falcon-registry = { path = "../pallets/falcon-registry", default-features = false }
+pallet-provider-registry = { path = "../pallets/provider-registry", default-features = false }
+pallet-storage-deals   = { path = "../pallets/storage-deals", default-features = false }
+pallet-storage-proofs  = { path = "../pallets/storage-proofs", default-features = false }
+pallet-payment-channels = { path = "../pallets/payment-channels", default-features = false }
 argonaut-primitives-falcon = { path = "../primitives/falcon", default-features = false }
+argonaut-primitives-storage = { path = "../primitives/storage", default-features = false }
 
 sp-api             = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412", default-features = false }
 sp-block-builder   = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412", default-features = false }
@@ -70,7 +75,12 @@ std = [
     "pallet-transaction-payment/std",
     "pallet-transaction-payment-rpc-runtime-api/std",
     "pallet-falcon-registry/std",
+    "pallet-provider-registry/std",
+    "pallet-storage-deals/std",
+    "pallet-storage-proofs/std",
+    "pallet-payment-channels/std",
     "argonaut-primitives-falcon/std",
+    "argonaut-primitives-storage/std",
     "sp-api/std",
     "sp-block-builder/std",
     "sp-core/std",
