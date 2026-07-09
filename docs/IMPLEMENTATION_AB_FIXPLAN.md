@@ -43,9 +43,22 @@ B-1+AF-4 (deterministic bridge timestamp), A-1 (sr25519 behind `dev-signatures`,
 
 Mirror the default peer set (`add_peers_to_reserved_set`) instead of independent Prism peer slots. **Not done** — building/testing a real multi-node Substrate docker-compose devnet is a large, slow-to-verify (Substrate release builds are 20-40+ min) artifact-authoring task. The existing `docker-compose.yml`/`scripts/*.sh` are still unmodified `substrate-node-template` boilerplate (`node-template` binary name, single `--dev` node) — replace them, don't extend them.
 
-### 3. A-4 remainder: auto-register-on-first-bootstrap-tx
+### 3. A-4 remainder: auto-register-on-first-bootstrap-tx — **DONE 2026-07-09**
 
-Doc §2.3's optional, config-gated behavior — would live inside `CheckFalconSignature`'s currently-no-op `Disabled`/bootstrap path. Lower priority than the size test (already done); no test-coverage gap the size assertion left open.
+Doc §2.3's optional, config-gated behavior. Implemented as a new
+`CheckFalconSignature::Bootstrap { sig, pk }` variant (appended last so the
+`RegistryMode`=0/`Disabled`=1 SCALE indices don't move): `validate` verifies the
+inline key directly (`account = blake3(pk)`, falcon-verify over the implication)
+and authorizes the origin; a custom `prepare` (replacing the defaulted no-op)
+best-effort `register_key`s the account when the `AUTO_REGISTER_ON_BOOTSTRAP`
+config gate (const in `runtime/src/extensions.rs`, on by default for this devnet)
+is set — so the first bootstrap tx doubles as registration. The classic
+`Signed`-preamble `FalconWithKey` path is untouched (still uses `Disabled`).
+Verified: `cargo test -p argonaut-runtime` green (10/10), incl. two new tests
+(`bootstrap_mode_verifies_authorizes_and_auto_registers`,
+`bootstrap_mode_rejects_wrong_signature`). **This clears the last Implementation-A
+backlog item — Implementation A is now fully code-complete and unit-tested
+(A-1 live-verified, A-3, A-4 + remainder all done).**
 
 ### 4. Backlog — as convenient, no correctness impact
 

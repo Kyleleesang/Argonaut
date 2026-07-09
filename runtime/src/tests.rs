@@ -147,6 +147,79 @@ fn registry_mode_rejects_already_authorized_origin() {
     });
 }
 
+/// A-4 (§2.3): a bootstrap-mode extrinsic (inline pk) verifies, authorizes the
+/// origin, and — with the `AUTO_REGISTER_ON_BOOTSTRAP` config gate on — registers
+/// the key in `prepare`, so the first transaction doubles as registration.
+#[test]
+fn bootstrap_mode_verifies_authorizes_and_auto_registers() {
+    new_test_ext().execute_with(|| {
+        let (sign_key, vrfy_key) = keypair(20);
+        let account = AccountId::from(blake3_hash(&vrfy_key));
+        Balances::make_free_balance_be(&account, 10_000);
+        assert!(FalconRegistry::keys(&account).is_none(), "not registered yet");
+
+        let call = remark_call();
+        let msg_hash = call.using_encoded(blake3_hash);
+        let sig_bytes = sign(&sign_key, 21, &msg_hash);
+        let sig = FalconSignature(BoundedVec::try_from(sig_bytes).unwrap());
+        let pk = FalconPublic(BoundedVec::try_from(vrfy_key).unwrap());
+
+        let ext = CheckFalconSignature::bootstrap(sig, pk.clone());
+        let info = DispatchInfo::default();
+
+        // validate: authorizes the origin and yields the registration candidate.
+        let (_valid, val, resulting_origin) = ext
+            .validate(
+                RuntimeOrigin::none(),
+                &call,
+                &info,
+                0,
+                (),
+                &TxBaseImplication(&call),
+                TransactionSource::External,
+            )
+            .expect("valid bootstrap signature must be accepted");
+        assert_eq!(resulting_origin.as_system_origin_signer(), Some(&account));
+        assert!(val.is_some(), "bootstrap yields a registration candidate");
+
+        // prepare: auto-registers the key (gate on) and reserves the deposit.
+        ext.prepare(val, &resulting_origin, &call, &info, 0).expect("prepare must succeed");
+        assert_eq!(FalconRegistry::keys(&account), Some(pk));
+        assert_eq!(Balances::reserved_balance(&account), crate::FALCON_KEY_DEPOSIT);
+    });
+}
+
+/// A bootstrap tx signed with the wrong key is rejected at `validate`.
+#[test]
+fn bootstrap_mode_rejects_wrong_signature() {
+    new_test_ext().execute_with(|| {
+        let (_sign_key, vrfy_key) = keypair(22);
+        let (other_sign_key, _other) = keypair(23);
+
+        let call = remark_call();
+        let msg_hash = call.using_encoded(blake3_hash);
+        let sig_bytes = sign(&other_sign_key, 24, &msg_hash); // wrong signer
+        let sig = FalconSignature(BoundedVec::try_from(sig_bytes).unwrap());
+        let pk = FalconPublic(BoundedVec::try_from(vrfy_key).unwrap());
+
+        let ext = CheckFalconSignature::bootstrap(sig, pk);
+        let info = DispatchInfo::default();
+        let result = ext.validate(
+            RuntimeOrigin::none(),
+            &call,
+            &info,
+            0,
+            (),
+            &TxBaseImplication(&call),
+            TransactionSource::External,
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            TransactionValidityError::Invalid(InvalidTransaction::BadProof)
+        );
+    });
+}
+
 #[test]
 fn disabled_is_a_pure_passthrough() {
     new_test_ext().execute_with(|| {
