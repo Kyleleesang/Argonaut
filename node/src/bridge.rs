@@ -273,3 +273,142 @@ async fn build_and_import_block(
         other => Err(format!("block import for leader level {level} was not accepted: {other:?}").into()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! AF-4 (fixplan "Open work" §1): the determinism choke-point.
+    //!
+    //! Two live nodes never share Prism state directly -- each maintains its
+    //! own `PrismChain`/`PrismDb`/`PrismLedger` and only agrees with peers by
+    //! processing the identical block DAG. The bridge's entire safety
+    //! argument (self-authored blocks import via a trusted
+    //! `StateAction::ApplyChanges` fast path; every other node re-verifies via
+    //! `PrismBridgeVerifier` and the runtime's own state-root check) rests on
+    //! this: the leader digest baked into a block's header must be a
+    //! deterministic function of the confirmed DAG, so two honest nodes that
+    //! received the same blocks always compute the identical digest bytes.
+    //! The 2026-07-07 two-node live run demonstrated this empirically; this
+    //! is the standing test the fixplan flagged as still missing.
+    //!
+    //! No mocking: two fully independent `PrismChain`+`PrismDb`+`PrismLedger`
+    //! triples (separate tempdirs, no shared state) are fed the identical
+    //! sequence of block inserts, then asserted to (a) confirm byte-identical
+    //! `ConfirmedLevel`s and (b) produce byte-identical `leader_digest_item`
+    //! encodings -- the exact bytes that end up `PreRuntime`-tagged in every
+    //! honest node's `BlockImportParams` header.
+    use super::*;
+    use argonaut_primitives_prism::{block_hash, BlockContent, ChainId, MerkleProof, Params, PrismBlock, SuperHeader};
+    use argonaut_prism_ledger::PrismLedger;
+    use sp_core::U256;
+    use std::sync::Arc;
+
+    fn params() -> Params {
+        let mut p = Params::testnet();
+        p.m_voter_chains = 4;
+        p
+    }
+
+    fn header(nonce: u64) -> SuperHeader {
+        SuperHeader {
+            parents_root: H256::zero(),
+            content_root: H256::zero(),
+            timestamp_ms: 0,
+            nonce,
+            difficulty: U256::max_value(),
+        }
+    }
+
+    fn proposer_block(nonce: u64, parent: H256, tx_refs: Vec<H256>, prop_refs: Vec<H256>) -> PrismBlock {
+        PrismBlock {
+            header: header(nonce),
+            parent,
+            content: BlockContent::Proposer { tx_refs, prop_refs },
+            parent_proof: MerkleProof::default(),
+            content_proof: MerkleProof::default(),
+        }
+    }
+
+    fn voter_block(nonce: u64, chain: ChainId, voter_parent: H256, votes: Vec<H256>) -> PrismBlock {
+        PrismBlock {
+            header: header(nonce),
+            parent: voter_parent,
+            content: BlockContent::Voter { chain, voter_parent, votes },
+            parent_proof: MerkleProof::default(),
+            content_proof: MerkleProof::default(),
+        }
+    }
+
+    /// A fresh, fully independent chain (own tempdir-backed `PrismDb`).
+    fn build_chain() -> (tempfile::TempDir, PrismChain, Arc<PrismDb>) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Arc::new(PrismDb::open(dir.path()).expect("open PrismDb"));
+        let chain = PrismChain::with_db(params(), db.clone());
+        (dir, chain, db)
+    }
+
+    fn vote_from_every_chain(chain: &mut PrismChain, nonce_start: u64, proposer_hash: H256) {
+        for c in 0..4u16 {
+            let tip = chain.voter_tips[c as usize].0;
+            chain.insert_block(voter_block(nonce_start + c as u64, c, tip, vec![proposer_hash]));
+        }
+    }
+
+    #[test]
+    fn two_independent_chains_confirm_byte_identical_leaders_and_digests() {
+        let (_dir_a, mut chain_a, db_a) = build_chain();
+        let (_dir_b, mut chain_b, db_b) = build_chain();
+
+        // Same `Params` (fixed `chain_spec_genesis`, no randomness) must yield
+        // the same proposer genesis on two independently-constructed chains --
+        // the precondition for everything below.
+        assert_eq!(chain_a.proposer_genesis, chain_b.proposer_genesis);
+
+        // Three proposer levels, each voted-in by every chain -- the IDENTICAL
+        // sequence of inserts, in the same order, fed to both chains
+        // independently (no shared state between chain_a and chain_b at all).
+        let mut parent = chain_a.proposer_genesis;
+        let mut nonce = 1u64;
+        for _ in 0..3u64 {
+            let p = proposer_block(nonce, parent, vec![], vec![]);
+            let p_hash = block_hash(&p.header);
+            chain_a.insert_block(p.clone());
+            chain_b.insert_block(p);
+            nonce += 1;
+
+            vote_from_every_chain(&mut chain_a, nonce, p_hash);
+            vote_from_every_chain(&mut chain_b, nonce, p_hash);
+            nonce += 4;
+
+            parent = p_hash;
+        }
+
+        let mut ledger_a = PrismLedger::new(db_a);
+        let mut ledger_b = PrismLedger::new(db_b);
+        let confirmed_a = ledger_a.advance(&chain_a, 0);
+        let confirmed_b = ledger_b.advance(&chain_b, 0);
+
+        assert!(!confirmed_a.is_empty(), "test setup must actually confirm something");
+        assert_eq!(confirmed_a.len(), confirmed_b.len());
+
+        for (a, b) in confirmed_a.iter().zip(confirmed_b.iter()) {
+            assert_eq!(a.level, b.level);
+            assert_eq!(
+                a.leader, b.leader,
+                "two independent chains disagreed on the confirmed leader at level {}",
+                a.level
+            );
+            assert_eq!(a.timestamp_ms, b.timestamp_ms);
+            assert_eq!(a.txs, b.txs);
+
+            // The actual bytes that land in every honest node's block header
+            // (the production function, not a re-implementation of it).
+            let digest_a = leader_digest_item(a.level, a.leader).encode();
+            let digest_b = leader_digest_item(b.level, b.leader).encode();
+            assert_eq!(
+                digest_a, digest_b,
+                "leader digest bytes diverged at level {} -- two honest nodes would fork silently",
+                a.level
+            );
+        }
+    }
+}

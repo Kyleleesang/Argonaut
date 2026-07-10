@@ -73,6 +73,10 @@ hex = { version = "0.4", features = ["serde"] }
 blake3 = { workspace = true, features = ["std"] }
 parity-scale-codec = { workspace = true, features = ["std"] }
 
+[dev-dependencies]
+# AF-4 determinism test (bridge.rs): tempdir-backed PrismDb instances.
+tempfile = "3"
+
 [build-dependencies]
 substrate-build-script-utils = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412" }
 

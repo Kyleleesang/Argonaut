@@ -1,0 +1,9 @@
+target/
+web/node_modules/
+web/dist/
+.git/
+.direnv/
+.cargo/
+.local/
+*.rs.bk
+docs/Prism.pdf
