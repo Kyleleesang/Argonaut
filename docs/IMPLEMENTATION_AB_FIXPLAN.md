@@ -70,3 +70,52 @@ Mirror the default peer set (`add_peers_to_reserved_set`) instead of independent
 
 - [ ] **AF-3:** finer-grained DAG concurrency (per-voter-chain locks or actor model). **Deliberately skipped** — its own text says "only when measured to matter," and nothing has measured the global `Mutex` to matter yet.
 - [ ] **Full network-level adversarial run:** the B4 adversarial harness (`client/prism-ledger/src/adversarial_tests.rs`) drives `PrismChain`/`PrismLedger` directly with attacker-chosen blocks (real state machine, no mocked adversary) — but nothing has run an actual multi-node adversarial scenario with real gossip/timing the way the honest-case live devnets have been run.
+
+---
+
+## Newly-found design issues (2026-07-10 fresh-eyes audit) — Sonnet-executable
+
+Found by re-reading the consensus/validation paths, not from the original review. **B-11 and B-12 are hard gates before any genuinely distributed (multi-machine, adversarial-timing) deployment** — everything green so far was verified on one machine / LAN where these don't fire. Execute in this order. **Restate the ground rules every time; items marked ⚠️ require a design decision — STOP and ask the user before implementing the "real fix," per ground rule 3.**
+
+### B-11 (🔴 CRITICAL, consensus safety): per-node difficulty retarget can permanently split the chain
+
+- **Symptom:** two honest nodes can permanently diverge (different DAGs → different never-reorging Substrate chains) with no recovery path.
+- **Root cause (verified):** `PrismChain::observe_for_retarget` (`client/prism-chain/src/lib.rs:378`) is called from each *accepted* arm of `insert_block` (lines 409, 439, 479) — i.e. in **local block-acceptance order** — and it mutates `self.params.difficulty` via `set_combined_target`. But `validate_block` (`primitives/prism/src/lib.rs:377`) checks a received block's **sortition against the receiver's current `params`** (which includes that mutated difficulty). Acceptance order is *not* consensus (gossip timing, B-6 backfill, restart replay all reorder it), so around a retarget boundary two nodes can hold different `difficulty` → the same block passes sortition on one node and fails `SortitionMismatch` on the other → permanent split.
+- **Interim fix — DO THIS NOW, it is safe and unblocks distributed testing** (fixed difficulty is what the Prism paper assumes; it is trivially consensus-safe):
+  1. Add `pub retarget_enabled: bool` to `Params` (`primitives/prism/src/lib.rs`); set it `false` in `Params::testnet()`.
+  2. In `observe_for_retarget` (`client/prism-chain/src/lib.rs:378`), early-`return` when `!self.params.retarget_enabled`. Difficulty is now constant for the node's life.
+  3. Fixed difficulty reintroduces the calibration/warmup problem, so set a sane fixed start: in `node/src/service.rs:193`, replace `p.difficulty >> 7` with a dev-appropriate constant (try `>> 3` or `>> 4`) so one dev CPU produces roughly `target_interval_ms`-rate blocks without the ~15-min warmup. Leave a comment that this is a dev-calibration constant (better home is a chain-spec param — see B-16).
+  4. **Verify:** 2-node devnet (reuse the B5-pruning setup), run ≥ 30 min, grep both logs for `SortitionMismatch` (must be zero) and confirm both nodes stay byte-identical at every `best: #N`.
+- **Real fix — ⚠️ DESIGN DECISION, do not implement without user sign-off:** make `difficulty` a pure function of *canonical* state. The confirmed **leader sequence** is identical on every node by construction (written to `columns::PROPOSER_LEADER_SEQUENCE` by `PrismLedger::advance`). Drive retargeting from leader-block timestamps *along that sequence* (in `advance`, not in `insert_block`), and change difficulty only at deterministic confirmed-level boundaries. The hard part is that `validate_block` must be able to check a block's PoW/sortition *before* it's confirmed, so the expected difficulty for a not-yet-confirmed block's era must itself be derivable from already-confirmed state — this needs a real design (epoch scheme keyed to confirmed level). Bring the user a written design first.
+
+### B-12 (🔴 HIGH, finality safety): an unproven confidence margin gates irreversible finality
+
+- **Symptom:** the chain's finality currently rests on a placeholder statistical margin with no derived security level, feeding a bridge that can never reorg.
+- **Root cause (verified):** `PrismLedger::advance` (`client/prism-ledger/src/lib.rs:179`) tries **stage-2 first** — `confirmation::confirm_unique_leader(chain, next, &ConfirmationParams::default())` — and only falls back to stage-1 via `.or_else(|| confirmed_leader_at_level(...))`. `ConfirmationParams::default()` uses `placeholder_delta_d`, which B-3 explicitly says is **not a real safety margin**. So stage-2 declares finality whenever it fires, on an unproven margin, and `node/src/bridge.rs` imports every level `finalized: true` with no reorg path.
+- **Fix (concrete, safe, and it also delivers the B-4 measurement toggle — one change closes two items):**
+  1. Add `pub stage2_enabled: bool` to `ConfirmationParams` (`client/prism-ledger/src/confirmation.rs`); default `false` in its `Default` impl.
+  2. At the top of `confirm_unique_leader`, `return None` if `!params.stage2_enabled`. With it off, `advance` confirms via stage-1 (conservative k-deep) only — the safe default until B-3's real `delta_d`/`k_min` operating point is derived.
+  3. Thread a node CLI flag `--prism-stage2` (default off, mirror `--prism-prune` in `node/src/cli.rs` → `command.rs` → `service::new_full` → the `advance` call) so it can be turned on for measurement without a rebuild.
+  4. **Verify + B-4:** unit test that `advance` with `stage2_enabled=false` confirms exactly what `confirmed_leader_at_level` does; then on proper hardware run the devnet with the flag off vs on and measure the confirmed-level latency delta (that is the deferred B-4 number).
+
+### B-13 (🟡 MED, resource leak / soft DoS): unbounded orphan pool
+
+- **Root cause (verified):** `PrismChain::orphans: HashMap<H256, PrismBlock>` (`client/prism-chain/src/lib.rs:102`) is inserted at lines 442 and 474 and never capped or evicted. PoW-valid blocks with unknown/never-arriving parents accumulate forever (attacker pays PoW per entry → slow leak, not cheap DoS, but unbounded).
+- **Fix:**
+  1. Add `const MAX_ORPHANS: usize = 10_000;` in `client/prism-chain/src/lib.rs`, plus a `VecDeque<H256>` tracking orphan insertion order.
+  2. At both `self.orphans.insert(...)` sites, if at capacity, evict the oldest (`pop_front` the deque, `orphans.remove` it) before inserting; keep the deque in sync on `drain_orphans` removals.
+  3. **Verify:** unit test — insert `MAX_ORPHANS + 100` orphan blocks, assert `orphans.len() <= MAX_ORPHANS` and no panic; then deliver a retained orphan's parent and assert it still resolves via `drain_orphans`.
+
+### B-14 (🟡 MED, manipulation): retarget trusts unvalidated header timestamps
+
+- **Root cause:** `DifficultyRetarget::observe` consumes `block.header.timestamp_ms` with no median-time-past or skew bound, so an adversarial miner can lie about timestamps to walk difficulty. **Subsumed by B-11:** the interim fix (retarget disabled) makes this moot; the real fix (deterministic-from-leader-sequence) bounds which timestamps count. **Do not fix separately — fold into B-11's real design** (add a median-time-past bound there).
+
+### B-15 (🟡 MED, liveness): stage-1 confirmation requires unanimity of all m chains
+
+- **Root cause:** `confirmed_leader_at_level` (`client/prism-ledger/src/lib.rs:~55`, doc comment calls it "deliberately conservative/unanimous") requires **every** one of the m voter chains to have voted. So a single censored or offline voter chain stalls *all* confirmation (this is likely the same mechanism as the B-9 two-honest-miner stall).
+- **⚠️ DESIGN DECISION — do not pick a threshold arbitrarily.** The correct quorum is the paper's §4/§4.5 condition (a confident majority tied to `delta_d`), *not* a guessed fraction. This is exactly what stage-2 (B-12) is designed to provide, so **deriving B-3's real `delta_d` + enabling stage-2 (B-12) is the higher-leverage fix** — treat B-15 as "resolved by doing B-12 properly," and only touch `confirmed_leader_at_level`'s threshold with the user's sign-off on the math.
+
+### B-16 (⚪ LOW, ops): consensus params are compile-time; `K_DEEP` duplicated
+
+- **Root cause:** `m_voter_chains`, the `>> 7` difficulty scale (`service.rs:193`), `target_interval_ms`, and `K_DEEP_CONFIRMATION` (`client/prism-ledger/src/lib.rs:38`, duplicated in `node/src/bridge.rs` per its own comment) are all compile-time — any tuning is a coordinated-binary hard fork, and the duplicated `K_DEEP` can silently drift.
+- **Fix (after the safety items):** move the consensus params into the chain-spec genesis config and read them in `service.rs` (`build_prism_params_from_spec`) instead of `Params::testnet()`; export `K_DEEP_CONFIRMATION` from one crate and have the other import it. Enables per-devnet tuning (small `m`, calibrated difficulty — see the difficulty discussion) without a hard fork. Verify: a chain spec with `m=4` produces a fast-confirming dev network; `cargo test --workspace` green.

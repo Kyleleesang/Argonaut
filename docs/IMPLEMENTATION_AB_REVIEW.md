@@ -213,6 +213,7 @@ These are the load-bearing design decisions the implementation got right — lis
 
 All numbered findings (B-1 through B-10, AF-1/AF-2/AF-4/AF-5, A-1/A-3/A-4 incl. auto-register) are resolved or partially addressed by design (B-3, B-7/AF-5's index-CF perf gap — see their `Status` lines). **Implementation A is fully closed — every remaining item below is Implementation B or backlog:**
 
-1. **Live-devnet verification** across the board — the single biggest remaining gap; see the fixplan doc.
-2. **AF-3** — finer-grained DAG concurrency. Only when measured to matter. (deferred by design)
-3. **B-10, full network-level adversarial run** — as convenient. (L)
+1. **B-11 / B-12 (🔴 new, 2026-07-10 fresh-eyes audit) — the two hard gates before any distributed deployment:** per-node difficulty retarget can permanently split the chain (`SortitionMismatch` from difficulty mutated in local acceptance order), and unproven stage-2 `delta_d` gates irreversible finality. Plus B-13..B-16 (orphan-pool bound, time-warp, stage-1 unanimity, compile-time params). **Full Sonnet-executable fix instructions are in [`IMPLEMENTATION_AB_FIXPLAN.md`](./IMPLEMENTATION_AB_FIXPLAN.md)'s "Newly-found design issues" section** — the interim fixes (disable retarget → fixed difficulty; gate stage-2 off) are safe and immediately actionable; the real fixes are flagged ⚠️ design-decision.
+2. **Live-devnet verification** — largely done 2026-07-10 (see the fixplan); B-4 speedup number needs proper hardware.
+3. **AF-3** — finer-grained DAG concurrency. Only when measured to matter. (deferred by design)
+4. **B-10, full network-level adversarial run** — as convenient. (L)
