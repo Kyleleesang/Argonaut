@@ -1,5 +1,12 @@
 # Implementation A & B — Fix Plan (execution checklist)
 
+> **Implementation A: CLOSED (2026-07-09).** Every A item (A-1 live-verified,
+> A-3, A-4, and the A-4 auto-register-on-bootstrap remainder) is done,
+> unit-tested, and committed. `docs/IMPLEMENTATION_A_PROGRESS.md` has been
+> deleted — its history now lives in git log and in the "Closed" section below.
+> **Everything from here on is Implementation-B-only** (plus the two backlog
+> items, neither of which is A- or B-specific).
+
 **You are picking this up in a fresh session.** Read [`IMPLEMENTATION_AB_REVIEW.md`](./IMPLEMENTATION_AB_REVIEW.md) for the *why* behind any item below (finding IDs B-1, AF-1, … refer to it). This file is the current *to-do list* — history of what was already fixed lives in git log, not here.
 
 ## Ground rules (do not skip)
@@ -7,14 +14,28 @@
 1. **Live-verify, don't just unit-test.** `cargo test --workspace` is necessary but *not sufficient*. For any item that changes runtime behavior, build the release binary and drive a real devnet (single- or multi-node as noted), because every bug that mattered on this project was found live, not by tests. Use `--network-backend libp2p` on every node (litep2p's request/response was `unimplemented!()`; B-8 worked around this in `prism-network`, but the flag is still the safe default).
 2. **Commit after each completed item** (or each coherent group), with a message naming the finding ID. Branch off `Base` if not already on it.
 3. **When a fix needs a decision you can't derive** (consensus-safety math, threat-model assumptions), stop and ask the user rather than guessing.
-4. Update [`IMPLEMENTATION_B_PROGRESS.md`](./IMPLEMENTATION_B_PROGRESS.md) / [`IMPLEMENTATION_A_PROGRESS.md`](./IMPLEMENTATION_A_PROGRESS.md) and this doc as items land, so all three stay the source of truth.
+4. Update [`IMPLEMENTATION_B_PROGRESS.md`](./IMPLEMENTATION_B_PROGRESS.md) and this doc as items land, so both stay the source of truth. (Implementation A's own tracker is retired — see the banner above.)
 5. **Don't trust a piped `cargo test`'s exit code.** `cargo test --workspace 2>&1 | tail -N` reports `tail`'s exit code, not `cargo test`'s — reads as `0` even when a test failed. Check the actual `test result: ... FAILED` lines, or redirect to a file and check `$?` there.
 
 ---
 
 ## Closed (code + unit-tested; nothing to do — see git log for detail)
 
-B-1+AF-4 (deterministic bridge timestamp), A-1 (sr25519 behind `dev-signatures`, genuinely out of production wasm as of the 2026-07-07 live-verification fix — see below), B-2 (difficulty retargeting), AF-1 (event-driven bridge wakeup via `Notify`), AF-2 (confirmation policy moved to `prism-ledger`), B-4 (stage-2 wired into the live path), B-7+AF-5 (restart correctness — full replay + ledger recovery), B-9 (two-honest-miner stall root-caused, not a bug — exact-tie artifact at small `m`, see `client/prism-ledger/src/honest_split_tests.rs`), B-6 (initial sync / historical backfill), B-5 (per-chain genesis hashes), B5 pruning + its `--prism-prune`/`--prism-k-prune` bridge wiring, B-8 (litep2p sync port via `sync_request`/`start_request`), A-3 (registry-mode transfer tooling, `node/examples/submit_transfer_registry.rs`), A-4 size assertion test (`runtime/src/tests.rs`).
+B-1+AF-4 (deterministic bridge timestamp), A-1 (sr25519 behind `dev-signatures`, genuinely out of production wasm as of the 2026-07-07 live-verification fix — see below), B-2 (difficulty retargeting), AF-1 (event-driven bridge wakeup via `Notify`), AF-2 (confirmation policy moved to `prism-ledger`), B-4 (stage-2 wired into the live path), B-7+AF-5 (restart correctness — full replay + ledger recovery), B-9 (two-honest-miner stall root-caused, not a bug — exact-tie artifact at small `m`, see `client/prism-ledger/src/honest_split_tests.rs`), B-6 (initial sync / historical backfill), B-5 (per-chain genesis hashes), B5 pruning + its `--prism-prune`/`--prism-k-prune` bridge wiring, B-8 (litep2p sync port via `sync_request`/`start_request`), A-3 (registry-mode transfer tooling, `node/examples/submit_transfer_registry.rs`), A-4 size assertion test (`runtime/src/tests.rs`), **A-4 remainder** (auto-register-on-first-bootstrap-tx, see below — this was the last open Implementation-A item; **Implementation A is now fully closed**).
+
+**A-4 remainder — auto-register-on-first-bootstrap-tx, done 2026-07-09.** Doc
+§2.3's optional, config-gated behavior. Implemented as a new
+`CheckFalconSignature::Bootstrap { sig, pk }` variant (appended last so the
+`RegistryMode`=0/`Disabled`=1 SCALE indices don't move): `validate` verifies the
+inline key directly (`account = blake3(pk)`, falcon-verify over the implication)
+and authorizes the origin; a custom `prepare` (replacing the defaulted no-op)
+best-effort `register_key`s the account when the `AUTO_REGISTER_ON_BOOTSTRAP`
+config gate (const in `runtime/src/extensions.rs`, on by default for this devnet)
+is set — so the first bootstrap tx doubles as registration. The classic
+`Signed`-preamble `FalconWithKey` path is untouched (still uses `Disabled`).
+Verified: `cargo test -p argonaut-runtime` green (10/10), incl. two new tests
+(`bootstrap_mode_verifies_authorizes_and_auto_registers`,
+`bootstrap_mode_rejects_wrong_signature`).
 
 **B-1/AF-4 live-verified for real, 2026-07-07 — and a genuine bug found + fixed in the process.** First actual two-node run of this devnet. Byte-identical `chain_getBlockHash` confirmed across both nodes for levels 0–5 (full 32-byte hash, not just the short display form) — B-1's own acceptance criterion, never run before this session. Along the way, restarting node2 after it fell behind (to test B-7) hit a real, previously undiscovered bug: `node/src/bridge.rs` attached the leader digest via `BlockImportParams::post_digests`, which only survives on the *authoring* node's trusted self-import (`StateAction::ApplyChanges`, no re-execution). Any other node receiving that block through ordinary Substrate block-sync — exactly what happens on restart or when a new node joins — re-executes it via `PrismBridgeVerifier`'s default `StateAction::Execute`, and `frame_executive::Executive::final_checks`' digest-count `assert_eq!` panicked (`wasm unreachable` trap) every time, because `initialize_block`'s `extract_pre_digest` only preserves `DigestItem::PreRuntime` items, silently dropping the `Other`-tagged leader digest during re-verification. **Meaning: any node that ever fell behind the Substrate chain could not safely rejoin the network at all.** Fixed by switching the digest to `DigestItem::PreRuntime` (`LEADER_DIGEST_ENGINE_ID = b"prsm"`), set *before* block-building via `BlockBuilderBuilder::with_inherent_digests` instead of after via `post_digests` — this variant survives identically through `initialize_block` whether the block is being authored or re-verified. Re-verified live after the fix: killed node2, let node1 advance to a level node2 hadn't seen, restarted node2 — it replayed its own DB (B-7), reconnected, backfilled the DAG (B-6, logged `backfill: N unknown hash(es)`), and its log showed `🏆 Imported #5 (...)` (a peer-authored block, not self-mined) with the hash matching node1's byte-for-byte. No panic. This is the AF-4 "determinism choke-point" concern materializing as a real bug, exactly as that finding warned, and it's now closed rather than just diagnosed.
 
@@ -43,24 +64,7 @@ B-1+AF-4 (deterministic bridge timestamp), A-1 (sr25519 behind `dev-signatures`,
 
 Mirror the default peer set (`add_peers_to_reserved_set`) instead of independent Prism peer slots. **Not done** — building/testing a real multi-node Substrate docker-compose devnet is a large, slow-to-verify (Substrate release builds are 20-40+ min) artifact-authoring task. The existing `docker-compose.yml`/`scripts/*.sh` are still unmodified `substrate-node-template` boilerplate (`node-template` binary name, single `--dev` node) — replace them, don't extend them.
 
-### 3. A-4 remainder: auto-register-on-first-bootstrap-tx — **DONE 2026-07-09**
-
-Doc §2.3's optional, config-gated behavior. Implemented as a new
-`CheckFalconSignature::Bootstrap { sig, pk }` variant (appended last so the
-`RegistryMode`=0/`Disabled`=1 SCALE indices don't move): `validate` verifies the
-inline key directly (`account = blake3(pk)`, falcon-verify over the implication)
-and authorizes the origin; a custom `prepare` (replacing the defaulted no-op)
-best-effort `register_key`s the account when the `AUTO_REGISTER_ON_BOOTSTRAP`
-config gate (const in `runtime/src/extensions.rs`, on by default for this devnet)
-is set — so the first bootstrap tx doubles as registration. The classic
-`Signed`-preamble `FalconWithKey` path is untouched (still uses `Disabled`).
-Verified: `cargo test -p argonaut-runtime` green (10/10), incl. two new tests
-(`bootstrap_mode_verifies_authorizes_and_auto_registers`,
-`bootstrap_mode_rejects_wrong_signature`). **This clears the last Implementation-A
-backlog item — Implementation A is now fully code-complete and unit-tested
-(A-1 live-verified, A-3, A-4 + remainder all done).**
-
-### 4. Backlog — as convenient, no correctness impact
+### 3. Backlog — as convenient, no correctness impact
 
 - [ ] **AF-3:** finer-grained DAG concurrency (per-voter-chain locks or actor model). **Deliberately skipped** — its own text says "only when measured to matter," and nothing has measured the global `Mutex` to matter yet.
 - [ ] **Full network-level adversarial run:** the B4 adversarial harness (`client/prism-ledger/src/adversarial_tests.rs`) drives `PrismChain`/`PrismLedger` directly with attacker-chosen blocks (real state machine, no mocked adversary) — but nothing has run an actual multi-node adversarial scenario with real gossip/timing the way the honest-case live devnets have been run.

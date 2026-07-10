@@ -2,9 +2,9 @@
 
 A standalone audit of Implementations A (Falcon signatures + registry) and B (Prism consensus) against the [`ARGONAUT_ARCHITECTURE_GUIDE.md`](./ARGONAUT_ARCHITECTURE_GUIDE.md) and the source paper ([`Prism.pdf`](./Prism.pdf)). **This document only diagnoses and prescribes — no code was changed to produce it.** Each finding says *what* deviates, *where*, *why it matters*, and *how to fix it*, so a later session can act on them in priority order.
 
-Companion to [`IMPLEMENTATION_A_PROGRESS.md`](./IMPLEMENTATION_A_PROGRESS.md) and [`IMPLEMENTATION_B_PROGRESS.md`](./IMPLEMENTATION_B_PROGRESS.md), which already record most of these as "out of scope" / "known limitation." This review pulls them into one place, adds two that the progress docs *don't* yet flag (B-1 bridge timestamp; A-1 sr25519 now in wasm), and — per the specific request that prompted it — spells out the fix for the block-difficulty deviation.
+Companion to [`IMPLEMENTATION_B_PROGRESS.md`](./IMPLEMENTATION_B_PROGRESS.md) (Implementation A's own tracker, `IMPLEMENTATION_A_PROGRESS.md`, was retired 2026-07-09 once every A item closed — see the fixplan doc's banner), which already record most of these as "out of scope" / "known limitation." This review pulls them into one place, adds two that the progress docs *don't* yet flag (B-1 bridge timestamp; A-1 sr25519 now in wasm), and — per the specific request that prompted it — spells out the fix for the block-difficulty deviation.
 
-> **Status as of 2026-07-07:** this doc is the original diagnosis and is left unmodified in its "why"; **[`IMPLEMENTATION_AB_FIXPLAN.md`](./IMPLEMENTATION_AB_FIXPLAN.md) is the authoritative source for what's actually been fixed since.** Each finding below now carries a one-line `Status` bullet pointing at the fixplan item that addressed (or deliberately deferred) it, so this document doesn't read as still-all-open. Quick summary: **resolved** (code-complete, live-verification still pending per the fixplan's own ground rules) — A-1, A-3, A-4 (size test), B-1/AF-4, B-2, B-5, B-6, B-8, AF-1, AF-2, B-4; **root-caused but not "fixed"** (behavior explained/proven, not a bug) — B-9; **partially addressed** — B-3 (paper's exact formula ported but not wired in as the default), B-7/AF-5 (a worse correctness bug than scoped was found and fixed; index-CF persistence itself still deferred); **still open, untouched** — A-2 (n/a, no fix needed), A-4 (auto-register half only), B-10, AF-3.
+> **Status as of 2026-07-09:** this doc is the original diagnosis and is left unmodified in its "why"; **[`IMPLEMENTATION_AB_FIXPLAN.md`](./IMPLEMENTATION_AB_FIXPLAN.md) is the authoritative source for what's actually been fixed since.** Each finding below now carries a one-line `Status` bullet pointing at the fixplan item that addressed (or deliberately deferred) it, so this document doesn't read as still-all-open. Quick summary: **resolved** (code-complete, live-verification still pending per the fixplan's own ground rules) — A-1, A-3, A-4 (size test + auto-register remainder — **Implementation A is now fully closed**), B-1/AF-4, B-2, B-5, B-6, B-8, AF-1, AF-2, B-4; **root-caused but not "fixed"** (behavior explained/proven, not a bug) — B-9; **partially addressed** — B-3 (paper's exact formula ported but not wired in as the default), B-7/AF-5 (a worse correctness bug than scoped was found and fixed; index-CF persistence itself still deferred); **still open, untouched** — A-2 (n/a, no fix needed), B-10, AF-3.
 
 ## Severity legend
 
@@ -43,7 +43,7 @@ Companion to [`IMPLEMENTATION_A_PROGRESS.md`](./IMPLEMENTATION_A_PROGRESS.md) an
 - **Where:** `pallets/falcon-registry`, `runtime/src/extensions.rs`.
 - **Deviation:** Guide §2.5 point 3 (registry-mode encoded extrinsic ≤ 850 bytes — asserted in a test) and §2.3's optional auto-register-on-first-bootstrap-tx are both unimplemented. Both already flagged in A-progress "Remaining / follow-ups."
 - **Fix:** Size test is trivial (`encode().len()` on a built registry-mode vs bootstrap-mode extrinsic, assert the delta ≈ 897). Auto-register is a config-gated branch inside `CheckFalconSignature`'s currently-no-op `Disabled`/bootstrap path.
-- **Status:** Size test RESOLVED (fixplan) — `runtime/src/tests.rs`, real Falcon-512 keypairs, registry-mode ≤ 850 bytes. **Auto-register still open** — lower value, no test-coverage gap the size assertion left open.
+- **Status:** Both RESOLVED (fixplan). Size test — `runtime/src/tests.rs`, real Falcon-512 keypairs, registry-mode ≤ 850 bytes. **Auto-register — done 2026-07-09**, via a new `CheckFalconSignature::Bootstrap { sig, pk }` variant + a config-gated `prepare()` (`AUTO_REGISTER_ON_BOOTSTRAP` const). This was the last open Implementation-A item; **Implementation A is now fully closed.**
 
 ---
 
@@ -136,13 +136,12 @@ Companion to [`IMPLEMENTATION_A_PROGRESS.md`](./IMPLEMENTATION_A_PROGRESS.md) an
 
 ## Fix order — what's actually left
 
-All items through B-3→B-4, B-5, B-6, B-8, A-3, and A-4's size test are resolved (code + unit tests; see each finding's `Status` line above). What remains, in priority order:
+All Implementation-A items (A-1, A-3, A-4 size test + auto-register) and B-3→B-4, B-5, B-6, B-8 are resolved (code + unit tests; see each finding's `Status` line above). **Implementation A has nothing left.** What remains, all Implementation B (or backlog):
 
 1. **Live-devnet verification** of every "resolved" item above — only `cargo test --workspace` has run so far. See [`IMPLEMENTATION_AB_FIXPLAN.md`](./IMPLEMENTATION_AB_FIXPLAN.md)'s "Live-verification debt" list for the exact runs needed (two-node byte-diff, wasm rejecting sr25519 live, retarget convergence, restart recovery, pruning end-to-end with a fresh backfilling node, etc.). This is the real gate before treating this as an actual multi-party network.
 2. **B-10** (docker-compose devnet artifact) — as convenient.
-3. **A-4's auto-register half** — as convenient, low value.
-4. **AF-3** (finer-grained DAG concurrency) — deferred by design until measured to matter.
-5. **Full network-level adversarial run** (real multi-node gossip/timing, not the single-process harness) — as convenient.
+3. **AF-3** (finer-grained DAG concurrency) — deferred by design until measured to matter.
+4. **Full network-level adversarial run** (real multi-node gossip/timing, not the single-process harness) — as convenient.
 
 ---
 
@@ -212,8 +211,8 @@ These are the load-bearing design decisions the implementation got right — lis
 
 ## What's left (folding in Part 2)
 
-All numbered findings (B-1 through B-10, AF-1/AF-2/AF-4/AF-5, A-1/A-3/A-4-size) are resolved or partially addressed by design (B-3, B-7/AF-5's index-CF perf gap — see their `Status` lines). What's genuinely open:
+All numbered findings (B-1 through B-10, AF-1/AF-2/AF-4/AF-5, A-1/A-3/A-4 incl. auto-register) are resolved or partially addressed by design (B-3, B-7/AF-5's index-CF perf gap — see their `Status` lines). **Implementation A is fully closed — every remaining item below is Implementation B or backlog:**
 
 1. **Live-devnet verification** across the board — the single biggest remaining gap; see the fixplan doc.
 2. **AF-3** — finer-grained DAG concurrency. Only when measured to matter. (deferred by design)
-3. **B-10, A-4's auto-register half, full network-level adversarial run** — as convenient. (L)
+3. **B-10, full network-level adversarial run** — as convenient. (L)
