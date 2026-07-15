@@ -24,11 +24,12 @@ use sp_api::impl_runtime_apis;
 use sp_core::{crypto::KeyTypeId, OpaqueMetadata};
 use sp_std::prelude::*;
 use sp_runtime::{
-    create_runtime_str, generic, impl_opaque_keys,
+    generic, impl_opaque_keys,
     traits::{AccountIdLookup, BlakeTwo256, Block as BlockT, IdentifyAccount, Verify},
     transaction_validity::{TransactionSource, TransactionValidity},
     ApplyExtrinsicResult,
 };
+use sp_version::Cow;
 #[cfg(feature = "std")]
 use sp_version::NativeVersion;
 use sp_version::RuntimeVersion;
@@ -70,8 +71,8 @@ pub mod opaque {
 
 #[sp_version::runtime_version]
 pub const VERSION: RuntimeVersion = RuntimeVersion {
-    spec_name: create_runtime_str!("argonaut"),
-    impl_name: create_runtime_str!("argonaut"),
+    spec_name: Cow::Borrowed("argonaut"),
+    impl_name: Cow::Borrowed("argonaut"),
     authoring_version: 1,
     spec_version: 100,
     impl_version: 1,

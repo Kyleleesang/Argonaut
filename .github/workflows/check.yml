@@ -1,44 +1,52 @@
 name: Check Set-Up & Build
 
-# Controls when the action will run.
+# Phase 0 acceptance criterion (docs/ARGONAUT_ARCHITECTURE_GUIDE.md §1.2): this workflow must
+# actually run (trigger on Base, where all work happens -- this repo never
+# touches main) and must actually build the wasm32-unknown-unknown runtime
+# rather than skip it, so a broken runtime build fails CI instead of silently
+# passing. Rewritten 2026-07-15: the previous version triggered on main only
+# (so it never ran), set SKIP_WASM_BUILD=1 (skipping the one build it claimed
+# to check), and predated dev-signatures and every crate added since Phase 0.
 on:
-  # Triggers the workflow on push or pull request events but only for the master branch
   push:
-    branches: [ main ]
+    branches: [ Base ]
   pull_request:
-    branches: [ main ]
-
-  # Allows you to run this workflow manually from the Actions tab
+    branches: [ Base ]
   workflow_dispatch:
 
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
   check:
-    # The type of runner that the job will run on
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
 
-    # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
 
-      - name: Set-Up
-        run: sudo apt install -y git clang curl libssl-dev llvm libudev-dev
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential clang libclang-dev protobuf-compiler pkg-config libssl-dev
 
-      - name: Install Rustup
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          source ~/.cargo/env
-          rustup default stable
-          rustup update nightly
-          rustup update stable
-          rustup target add wasm32-unknown-unknown --toolchain nightly
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rust-src
 
-      - name: Check Build
-        run: |
-          SKIP_WASM_BUILD=1 cargo check --release
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Check Build for Benchmarking
-        run: >
-          pushd node &&
-          cargo check --features=runtime-benchmarks --release
+      # Full release build, no SKIP_WASM_BUILD: this is what actually forces
+      # substrate-wasm-builder to compile argonaut-runtime for
+      # wasm32-unknown-unknown, not just check the native side.
+      - name: Build (release, node binary + wasm runtime)
+        run: cargo build --release --workspace
+
+      # Dedicated check so a wasm-specific regression (e.g. the toolchain-skew
+      # "undefined symbol" class of failure found while building B-10's Docker
+      # image, docs/IMPLEMENTATION_AB_FIXPLAN.md) is attributable to this step
+      # by name, not buried in a generic build failure.
+      - name: Verify wasm32-unknown-unknown runtime artifact exists
+        run: test -f target/release/wbuild/argonaut-runtime/argonaut_runtime.compact.compressed.wasm
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Build for benchmarking
+        run: cargo check -p argonaut-node --features=runtime-benchmarks --release

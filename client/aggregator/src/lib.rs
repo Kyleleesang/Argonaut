@@ -12,7 +12,7 @@
 //! # Fee model (documented per §4.3)
 //! Bundle fee = base_fee + per_inner_tx_fee.
 //! The aggregator collects inner-tx tips — this is what pays for prover hardware.
-use argonaut_primitives_agg::{statement_hash, AggBundle, AggSchemeId, XmssRootRef};
+use argonaut_primitives_agg::{AggBundle, AggSchemeId, XmssRootRef};
 
 pub const N_MAX: usize = 1024;
 pub const T_MAX_MS: u64 = 750;
