@@ -3,7 +3,6 @@ use futures::FutureExt;
 use argonaut_primitives_prism::Params as PrismParams;
 use argonaut_prism_chain::PrismChain;
 use argonaut_prism_db::PrismDb;
-use argonaut_prism_ledger::K_DEEP_CONFIRMATION;
 use argonaut_prism_miner::{build_template, PrismMiner};
 use argonaut_prism_network::wire::{blocks_protocol_config, sync_protocol_config, PrismNetworkWorker};
 use argonaut_runtime::{self, opaque::Block, RuntimeApi};
@@ -115,11 +114,14 @@ pub fn new_partial(config: &Configuration) -> Result<Service, ServiceError> {
 ///
 /// `prism_prune`/`prism_k_prune` are `--prism-prune`/`--prism-k-prune` off
 /// `node/src/cli.rs`, threaded down to `run_prism_bridge` (see B5 pruning,
-/// `docs/IMPLEMENTATION_AB_FIXPLAN.md`'s "Then: B5 (pruning)").
+/// `docs/IMPLEMENTATION_AB_FIXPLAN.md`'s "Then: B5 (pruning)"). `prism_stage2`
+/// is `--prism-stage2` (B-12), off by default -- see its doc comment in
+/// `node/src/cli.rs`.
 pub fn new_full<N: sc_network::NetworkBackend<Block, <Block as sp_runtime::traits::Block>::Hash>>(
     config: Configuration,
     prism_prune: bool,
     prism_k_prune: u64,
+    prism_stage2: bool,
 ) -> Result<TaskManager, ServiceError> {
     let sc_service::PartialComponents {
         client,
@@ -171,26 +173,36 @@ pub fn new_full<N: sc_network::NetworkBackend<Block, <Block as sp_runtime::trait
     // own DAG state machine, gossip/sync protocols, miner, and (B3) the bridge
     // that derives the actual Substrate chain from confirmed leader levels.
     //
-    // B-2: this is now only the *initial guess* `PrismChain`'s
-    // `DifficultyRetarget` starts correcting from (matching Bitcoin's own
-    // genesis-difficulty pattern), not a permanent hardcoded scale -- it's
-    // fed every accepted block's timestamp and adjusts `difficulty`/`f_v`/
-    // `f_t`/`f_p` toward `Params::target_interval_ms` over time. Started
-    // from `Params::testnet()`'s own raw difficulty scaled down by the same
-    // empirical `>>7` factor B2 found necessary (at m=100 voter chains,
-    // testnet's unscaled difficulty produces several *dozen* Prism blocks
-    // per second on one CPU, enough to trip peer reputation/rate-limiting),
-    // so the first `RETARGET_WINDOW` blocks -- before retargeting has fired
-    // even once -- don't reproduce that flood while waiting to converge.
-    // B-5: domain-separates this network's Prism DAG from every other's --
-    // every stored block's ancestry ultimately derives from this value via
-    // `genesis_hash`. The Substrate chain's own genesis hash is a natural
-    // per-network-unique anchor already agreed on by every node (it's
-    // baked into the chain spec), so no separate Prism-specific genesis
-    // config is needed.
+    // B-16: `m_voter_chains`/starting `difficulty`/`target_interval_ms` are
+    // read from the chain spec's `properties` (`node/src/chain_spec.rs`),
+    // not hardcoded here -- lets a chain spec tune these per-deployment
+    // without a rebuild. `retarget_enabled` stays hardcoded `false` below,
+    // deliberately NOT chain-spec-driven: it's a consensus-SAFETY choice
+    // (per-node difficulty retargeting can permanently split the chain --
+    // see `Params::retarget_enabled`'s doc comment, B-11), not an
+    // operational tuning knob a chain-spec author should be able to flip.
+    //
+    // The starting difficulty is inherently a one-machine calibration best-
+    // guess (see `PrismChainSpecParams::default`'s doc comment for the
+    // empirical anchor points this repo's default was set from) -- since
+    // retargeting is off, it's the *permanent* difficulty for the chain's
+    // life, so a deployment with different hardware should override
+    // `prismDifficultyShift` in its own chain spec rather than editing code.
+    //
+    // B-5: `chain_spec_genesis` domain-separates this network's Prism DAG
+    // from every other's -- every stored block's ancestry ultimately derives
+    // from this value via `genesis_hash`. The Substrate chain's own genesis
+    // hash is a natural per-network-unique anchor already agreed on by
+    // every node (it's baked into the chain spec), so no separate
+    // Prism-specific genesis config is needed.
+    let prism_chain_spec_params =
+        crate::chain_spec::prism_params_from_properties(&config.chain_spec.properties());
     let prism_params = {
         let mut p = PrismParams::testnet();
-        p.set_combined_target(p.difficulty >> 7);
+        p.m_voter_chains = prism_chain_spec_params.m_voter_chains;
+        p.target_interval_ms = prism_chain_spec_params.target_interval_ms;
+        p.retarget_enabled = false; // B-11: hardcoded, see comment above
+        p.set_combined_target(sp_core::U256::max_value() >> prism_chain_spec_params.difficulty_shift);
         p.chain_spec_genesis = client.info().genesis_hash;
         p
     };
@@ -228,10 +240,11 @@ pub fn new_full<N: sc_network::NetworkBackend<Block, <Block as sp_runtime::trait
             client.clone(),
             prism_chain.clone(),
             prism_db,
-            K_DEEP_CONFIRMATION,
+            prism_chain_spec_params.k_deep_confirmation,
             confirmation_notify,
             prism_prune,
             prism_k_prune,
+            prism_stage2,
         ),
     );
 

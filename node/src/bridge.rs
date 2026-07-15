@@ -11,7 +11,7 @@
 use crate::service::FullClient;
 use argonaut_prism_chain::PrismChain;
 use argonaut_prism_db::PrismDb;
-use argonaut_prism_ledger::PrismLedger;
+use argonaut_prism_ledger::{confirmation::ConfirmationParams, PrismLedger};
 use argonaut_primitives_prism::H256;
 use argonaut_runtime::opaque::{Block, UncheckedExtrinsic};
 use parity_scale_codec::{Decode, Encode};
@@ -31,9 +31,12 @@ use std::time::Duration;
 
 /// Must match `pallet_timestamp::Config::MinimumPeriod` in `runtime/src/lib.rs`
 /// (`ConstU64<{ SLOT_DURATION / 2 }>`). Duplicated here (rather than adding a
-/// `pallet-timestamp` dependency just to read one `Get` impl) the same way
-/// `K_DEEP_CONFIRMATION` is duplicated between `prism-ledger` and this crate
-/// -- if the runtime's `MinimumPeriod` ever changes, update this too.
+/// `pallet-timestamp` dependency just to read one `Get` impl) -- if the
+/// runtime's `MinimumPeriod` ever changes, update this too. (An earlier
+/// version of this comment claimed `K_DEEP_CONFIRMATION` was duplicated the
+/// same way -- it isn't: `node/src/service.rs` imports
+/// `argonaut_prism_ledger::K_DEEP_CONFIRMATION`/its chain-spec-driven value
+/// directly, see B-16. That was a stale comment, not a real duplication.)
 const TIMESTAMP_MINIMUM_PERIOD_MS: u64 = argonaut_runtime::SLOT_DURATION / 2;
 
 /// Raw storage key for `pallet_timestamp::Now` (`twox_128("Timestamp") ++
@@ -153,6 +156,7 @@ pub async fn run_prism_bridge(
     confirmation_notify: Arc<tokio::sync::Notify>,
     prune_enabled: bool,
     k_prune: u64,
+    stage2_enabled: bool,
 ) {
     // B-7: recover the ledger's cursor from the Substrate chain's own
     // best-block number, not a fresh `PrismLedger::new` -- see
@@ -160,6 +164,10 @@ pub async fn run_prism_bridge(
     // start replaying confirmed levels from 1 again.
     let best_number: u64 = client.info().best_number.into();
     let mut ledger = PrismLedger::recover(prism_db, best_number);
+    // B-12: `--prism-stage2` (off by default) -- see its doc comment in
+    // `node/src/cli.rs` for why an unproven confidence margin must not gate
+    // finality by default.
+    let confirmation_params = ConfirmationParams { stage2_enabled, ..ConfirmationParams::default() };
 
     loop {
         let woke_by_fallback_tick = tokio::select! {
@@ -169,7 +177,7 @@ pub async fn run_prism_bridge(
 
         let confirmed = {
             let chain = prism_chain.lock().expect("PrismChain mutex poisoned");
-            ledger.advance(&chain, k_deep)
+            ledger.advance_with_params(&chain, k_deep, &confirmation_params)
         };
 
         for level in confirmed {

@@ -26,6 +26,18 @@ pub struct Cli {
     /// confirmation's own reorg-depth assumption.
     #[arg(long, default_value_t = 60)]
     pub prism_k_prune: u64,
+
+    /// Enable stage-2 confidence-interval fast confirmation
+    /// (`client/prism-ledger`'s `confirmation::confirm_unique_leader`), which
+    /// otherwise races stage-1's conservative k-deep rule ahead of it. **Off
+    /// by default (B-12):** stage-2's live `delta_d` is a flagged placeholder
+    /// (B-3), not the paper's derived operating point, so with this on, the
+    /// bridge's irreversible finality rests on an unproven confidence margin.
+    /// Exists mainly to measure/compare confirmed-level latency with stage-2
+    /// on vs. off (B-4) -- see `docs/IMPLEMENTATION_AB_FIXPLAN.md`'s B-12
+    /// entry before enabling this on anything but a throwaway devnet.
+    #[arg(long)]
+    pub prism_stage2: bool,
 }
 
 #[derive(Debug, clap::Subcommand)]
