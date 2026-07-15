@@ -1,17 +1,105 @@
-version: "3.2"
+# B-10: real 3-node Argonaut devnet (replaces the old paritytech/ci-linux
+# single-`--dev`-node boilerplate). Mirrors the live-verification topology
+# already exercised manually on 2026-07-10 (archive + pruning + fresh
+# backfilling node) -- see docs/IMPLEMENTATION_AB_FIXPLAN.md's B5-pruning
+# entry -- as a reusable, one-command artifact instead of hand-run processes.
+#
+# node1 = archive/bootnode: mines, never prunes. Every devnet needs at least
+#   one archive node so B-6 backfill has somewhere to fetch full history from
+#   (node/src/cli.rs's own --prism-prune doc comment says this explicitly).
+# node2 = pruning peer: mines, --prism-prune on, peered off node1.
+# node3 = fresh peer: does NOT mine, boots with an empty --base-path every
+#   `docker compose up` (see its volume, a fresh anonymous one each run) --
+#   exercises B-6 backfill against the archive on every startup, exactly the
+#   scenario the 2026-07-10 live run validated by hand.
+#
+# Usage:
+#   docker compose build              # ~20-40 min first time (see Dockerfile)
+#   docker compose up                 # all 3 nodes, logs interleaved
+#   docker compose up node1 node2     # skip the fresh-backfill node
+#   docker compose down -v            # drop node3's volume to re-trigger a
+#                                      # fresh backfill next `up`
+#
+# Node keys (docker/keys/*.key) are committed devnet-only identities (fixed
+# PeerIds so --bootnodes can be hardcoded below) -- same convention as
+# Substrate's own well-known dev node-keys, not sensitive.
+
+x-argonaut-image: &argonaut-image
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: argonaut-devnet:latest
 
 services:
-  dev:
-    container_name: node-template
-    image: paritytech/ci-linux:production
-    working_dir: /var/www/node-template
-    ports:
-      - "9944:9944"
+  node1:
+    <<: *argonaut-image
+    container_name: argonaut-node1-archive
+    entrypoint: ["/bin/bash", "/scripts/docker-entrypoint.sh"]
     environment:
-      - CARGO_HOME=/var/www/node-template/.cargo
+      NODE_NAME: archive1
+      VALIDATOR: "true"
+      PRISM_PRUNE: "false"
+      NODE_KEY_FILE: /keys/node1.key
+      PORT: "30333"
+      RPC_PORT: "9944"
+      PROMETHEUS_PORT: "9615"
+    ports:
+      - "30333:30333"
+      - "9944:9944"
     volumes:
-      - .:/var/www/node-template
-      - type: bind
-        source: ./.local
-        target: /root/.local
-    command: bash -c "cargo build --release && ./target/release/node-template --dev --ws-external"
+      - ./docker/keys/node1.key:/keys/node1.key:ro
+      - ./scripts/docker-entrypoint.sh:/scripts/docker-entrypoint.sh:ro
+      - node1-data:/data
+
+  node2:
+    <<: *argonaut-image
+    container_name: argonaut-node2-pruning
+    entrypoint: ["/bin/bash", "/scripts/docker-entrypoint.sh"]
+    environment:
+      NODE_NAME: pruning2
+      VALIDATOR: "true"
+      PRISM_PRUNE: "true"
+      PRISM_K_PRUNE: "3"
+      NODE_KEY_FILE: /keys/node2.key
+      PORT: "30333"
+      RPC_PORT: "9944"
+      PROMETHEUS_PORT: "9615"
+      BOOTNODES: "/dns4/node1/tcp/30333/p2p/12D3KooWJmR9RXJHAFrJpYeJUSVpDiYuSVzcKtpSV3Pzck9XRJX8"
+    ports:
+      - "30334:30333"
+      - "9945:9944"
+    volumes:
+      - ./docker/keys/node2.key:/keys/node2.key:ro
+      - ./scripts/docker-entrypoint.sh:/scripts/docker-entrypoint.sh:ro
+      - node2-data:/data
+    depends_on:
+      - node1
+
+  node3:
+    <<: *argonaut-image
+    container_name: argonaut-node3-fresh
+    entrypoint: ["/bin/bash", "/scripts/docker-entrypoint.sh"]
+    environment:
+      NODE_NAME: fresh3
+      VALIDATOR: "false"
+      PRISM_PRUNE: "false"
+      NODE_KEY_FILE: /keys/node3.key
+      PORT: "30333"
+      RPC_PORT: "9944"
+      PROMETHEUS_PORT: "9615"
+      BOOTNODES: "/dns4/node1/tcp/30333/p2p/12D3KooWJmR9RXJHAFrJpYeJUSVpDiYuSVzcKtpSV3Pzck9XRJX8,/dns4/node2/tcp/30333/p2p/12D3KooWKSjotWfvdknJ4uZENC8y84hK5eX8ZRo22LcFks9zScuN"
+    ports:
+      - "30335:30333"
+      - "9946:9944"
+    volumes:
+      - ./docker/keys/node3.key:/keys/node3.key:ro
+      - ./scripts/docker-entrypoint.sh:/scripts/docker-entrypoint.sh:ro
+      - node3-data:/data  # intentionally NOT persisted across `down -v`
+    depends_on:
+      - node1
+      - node2
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
