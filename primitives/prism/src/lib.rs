@@ -54,6 +54,26 @@ pub struct Params {
     /// `H256::zero()`, which is fine as a *value* now that it's just an
     /// input to `genesis_hash` rather than the genesis hash itself).
     pub chain_spec_genesis: H256,
+    /// B-11: gates [`DifficultyRetarget`] from ever mutating `difficulty`
+    /// after construction. **Off by default.** Root cause this guards
+    /// against: `difficulty` is retargeted from *locally accepted* block
+    /// timestamps (`PrismChain::observe_for_retarget`), and acceptance order
+    /// is not consensus (gossip timing, B-6 backfill, and restart replay all
+    /// reorder it) -- so two honest nodes can hold different `difficulty`
+    /// values across a retarget boundary, and `validate_block`'s sortition
+    /// check (which reads the receiver's *local* `params.difficulty`) can
+    /// then accept a block on one node and reject it with
+    /// `SortitionMismatch` on the other: a permanent, silent chain split
+    /// with no reorg path (the bridge, `node/src/bridge.rs`, never reorgs).
+    /// Fixed difficulty is what the Prism paper itself assumes and is
+    /// trivially consensus-safe (every node's `params.difficulty` is then a
+    /// pure function of the chain spec, identical everywhere, forever). The
+    /// real fix -- deriving difficulty deterministically from the
+    /// *canonical* confirmed-leader sequence instead of local acceptance
+    /// order -- is a genuine design problem (see
+    /// `docs/IMPLEMENTATION_AB_FIXPLAN.md`'s B-11 entry) and intentionally
+    /// not attempted here.
+    pub retarget_enabled: bool,
 }
 
 impl Params {
@@ -74,6 +94,8 @@ impl Params {
             f_p,
             target_interval_ms: 1_000,
             chain_spec_genesis: H256::zero(),
+            // B-11: off by default -- see the field doc comment above.
+            retarget_enabled: false,
         }
     }
 

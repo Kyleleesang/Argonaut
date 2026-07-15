@@ -249,11 +249,16 @@ fn persistent_balancing_attacker_stalls_stage1_alone_but_not_the_system() {
     }
 
     let mut ledger = PrismLedger::new(db);
+    // B-12: stage2_enabled is off by default; this test's whole point is
+    // demonstrating stage-2 rescuing the system from stage-1's liveness
+    // weakness, so opt it on explicitly.
+    let confirmation_params =
+        confirmation::ConfirmationParams { stage2_enabled: true, ..Default::default() };
 
     // Chain 0 briefly agrees with the majority (not yet k-deep)...
     nonce += 1;
     chain.insert_block(voter_block(nonce, 0, chain.voter_genesis[0], vec![p1_hash]));
-    assert_eq!(ledger.advance(&chain, K), vec![]);
+    assert_eq!(ledger.advance_with_params(&chain, K, &confirmation_params), vec![]);
 
     // ...then the attacker reorgs it onto a longer fork voting the minority
     // block instead (depth 2 > the depth-1 tip it replaces), and simply
@@ -278,7 +283,7 @@ fn persistent_balancing_attacker_stalls_stage1_alone_but_not_the_system() {
         // The system as a whole (stage-2 first, stage-1 fallback): should
         // confirm p1 once the honest chains' depth advantage is enough for
         // stage-2's confidence interval to declare it the unique leader.
-        let confirmed = ledger.advance(&chain, K);
+        let confirmed = ledger.advance_with_params(&chain, K, &confirmation_params);
         if !confirmed.is_empty() {
             assert_eq!(confirmed.len(), 1);
             assert_eq!(confirmed[0].leader, p1_hash);

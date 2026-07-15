@@ -115,6 +115,116 @@ mod paper_formula_tests {
     }
 }
 
+/// B-3: Monte Carlo cross-check of [`single_check_margin`] against a literal
+/// simulation of the Bernoulli sum the Chernoff bound (eq. 32) is bounding --
+/// an independent check on the algebra (quadratic-formula solve for `a`), not
+/// just "it compiles and returns a number". Uses a fixed seed for
+/// reproducibility; a real bug in the derivation should make the empirical
+/// violation rate blow past the claimed `eps_target`, not hover near it, so
+/// this has real power to catch a mistake despite the modest trial count
+/// tests can afford to run.
+mod single_check_margin_tests {
+    use super::*;
+    use rand_chacha::ChaCha20Rng;
+    use rand_core::{RngCore, SeedableRng};
+
+    /// `4*e^{-gamma(beta)*k/2}` -- the same worst-case upper bound on the
+    /// per-chain "atypical" probability [`single_check_margin`] uses
+    /// internally, exposed here so the Monte Carlo simulates from EXACTLY the
+    /// mean the bound is derived against (the true worst case: `p == mu_bar`,
+    /// not some arbitrary smaller value that would make the check too easy).
+    fn mu_bar(k: u64, beta: f64) -> f64 {
+        let g = (1.0 / 36.0) * (1.0 - 2.0 * beta).powi(2);
+        4.0 * (-g * k as f64 / 2.0).exp()
+    }
+
+    /// Uniform f64 in [0, 1) from 53 random bits -- the standard technique
+    /// (same one `rand`'s own `gen::<f64>()` uses internally), so this
+    /// doesn't need to pull in the full `rand` crate just for one call site.
+    fn uniform_f64(rng: &mut ChaCha20Rng) -> f64 {
+        (rng.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
+    }
+
+    /// Simulate `m` i.i.d. Bernoulli(`p`) draws `trials` times, return the
+    /// fraction of trials where the sample mean reaches `rho`.
+    fn empirical_violation_rate(m: u64, p: f64, rho: f64, trials: u32, seed: u64) -> f64 {
+        let mut rng = ChaCha20Rng::seed_from_u64(seed);
+        let mut violations = 0u32;
+        for _ in 0..trials {
+            let count = (0..m).filter(|_| uniform_f64(&mut rng) < p).count() as u64;
+            if (count as f64) / (m as f64) >= rho {
+                violations += 1;
+            }
+        }
+        violations as f64 / trials as f64
+    }
+
+    #[test]
+    fn single_check_margin_empirically_holds_at_several_m_k_combinations() {
+        let beta = ASSUMED_ADVERSARY_FRACTION;
+        let eps_target = 1e-4; // loose enough to empirically validate with a modest trial count
+        let trials = 200_000u32;
+
+        for &(m, k) in &[(100u64, 1_500u64), (100, 2_000), (1_000, 1_000), (1_000, 1_500)] {
+            let rho = single_check_margin(k, m, beta, eps_target);
+            let p = mu_bar(k, beta);
+            let empirical = empirical_violation_rate(m, p, rho, trials, 42);
+            // Give a generous slack multiple (not a tight equality) -- Monte
+            // Carlo noise at 200k trials on a 1e-4 target has real variance;
+            // this is a "the derivation isn't badly wrong" check, not a
+            // precision instrument. A genuine algebra bug (e.g. dropping the
+            // factor of 2, or solving the wrong root of the quadratic) blows
+            // this up by orders of magnitude, which this comfortably catches.
+            assert!(
+                empirical <= eps_target * 5.0,
+                "m={m} k={k}: empirical violation rate {empirical} far exceeds \
+                 target {eps_target} (rho={rho}, mu_bar={p}) -- single_check_margin's \
+                 derivation likely has a real bug"
+            );
+        }
+    }
+
+    #[test]
+    fn single_check_margin_is_between_zero_and_one_for_practical_depths() {
+        // A margin >= 1 (subtracting >= 100% of m) is a vacuous bound, not
+        // wrong per se, but any (m, k, eps) combination meant to be used in
+        // practice must clear this floor.
+        let beta = ASSUMED_ADVERSARY_FRACTION;
+        assert!(single_check_margin(2_000, 100, beta, 1e-6) < 1.0);
+        assert!(single_check_margin(1_500, 1_000, beta, 1e-6) < 1.0);
+    }
+
+    #[test]
+    fn single_check_margin_shrinks_as_m_grows_at_fixed_depth_and_target() {
+        // Chernoff concentration is a function of m, not just depth -- more
+        // voter chains means a tighter margin at the SAME k, matching the
+        // module doc's m=100 vs m=1000 comparison.
+        let beta = ASSUMED_ADVERSARY_FRACTION;
+        assert!(
+            single_check_margin(1_500, 1_000, beta, 1e-6)
+                < single_check_margin(1_500, 100, beta, 1e-6)
+        );
+    }
+
+    /// B-15: the example preset is correctly wired -- `stage2_enabled` is on
+    /// (self-contained, usable as-is if plugged into `advance_with_params`)
+    /// and `delta_d` actually delegates to `single_check_margin` at the
+    /// documented `(β=0.25, ε_target=1e-6)` point, not some other formula.
+    #[test]
+    fn example_single_check_confirmation_params_is_wired_correctly() {
+        let params = example_single_check_confirmation_params_beta025_eps1e6();
+        assert!(params.stage2_enabled, "must be immediately usable as-is");
+        assert_eq!(params.k_min, 0);
+        for &(depth, m) in &[(1_500u64, 100u64), (2_000, 1_000)] {
+            assert_eq!(
+                (params.delta_d)(depth, m),
+                single_check_margin(depth, m, ASSUMED_ADVERSARY_FRACTION, 1e-6),
+                "delta_d must delegate to single_check_margin at the documented operating point"
+            );
+        }
+    }
+}
+
 mod lower_bound_from_depths_tests {
     use super::*;
 
@@ -180,14 +290,18 @@ fn confirm_proposer_list_excludes_the_far_behind_sibling() {
 #[test]
 fn confirm_unique_leader_declares_p1_once_its_lower_bound_beats_p2s_upper() {
     let (chain, p1_hash, _p2_hash) = build_contested_level();
-    let params = ConfirmationParams::default();
+    // B-12: stage2_enabled is off by default; this test exercises
+    // confirm_unique_leader's math directly, so opt it on explicitly.
+    let params = ConfirmationParams { stage2_enabled: true, ..ConfirmationParams::default() };
     assert_eq!(confirm_unique_leader(&chain, 1, &params), Some(p1_hash));
 }
 
 #[test]
 fn no_proposer_at_level_yields_empty_list_and_no_leader() {
     let chain = PrismChain::new(params(4));
-    let params = ConfirmationParams::default();
+    // B-12: opt stage-2 on so this `None` comes from the "no proposer at
+    // level" branch, not from the stage2_enabled gate short-circuiting first.
+    let params = ConfirmationParams { stage2_enabled: true, ..ConfirmationParams::default() };
     assert_eq!(confirm_proposer_list(&chain, 1, &params), Vec::<H256>::new());
     assert_eq!(confirm_unique_leader(&chain, 1, &params), None);
 }
@@ -216,7 +330,8 @@ fn single_proposer_with_full_deep_votes_is_confirmed_alone() {
         extend(&mut chain, c, 9, &mut nonce);
     }
 
-    let params = ConfirmationParams::default();
+    // B-12: opt stage-2 on -- this test exercises confirm_unique_leader's math.
+    let params = ConfirmationParams { stage2_enabled: true, ..ConfirmationParams::default() };
     assert_eq!(confirm_proposer_list(&chain, 1, &params), vec![p1_hash]);
     assert_eq!(confirm_unique_leader(&chain, 1, &params), Some(p1_hash));
 }
@@ -255,7 +370,9 @@ fn evenly_matched_contenders_confirm_as_a_list_but_not_a_unique_leader() {
         extend(&mut chain, c, 9, &mut nonce);
     }
 
-    let params = ConfirmationParams::default();
+    // B-12: opt stage-2 on -- this test's point is that confirm_unique_leader
+    // returns None on the MATH (evenly matched), not on the gate.
+    let params = ConfirmationParams { stage2_enabled: true, ..ConfirmationParams::default() };
     let mut list = confirm_proposer_list(&chain, 1, &params);
     list.sort();
     let mut expected = vec![p1_hash, p2_hash];

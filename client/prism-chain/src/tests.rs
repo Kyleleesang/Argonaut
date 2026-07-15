@@ -398,7 +398,12 @@ fn leader_at_level_tie_breaks_deterministically_by_hash() {
 /// no votes/deps required.
 #[test]
 fn insert_block_feeds_the_difficulty_retarget_with_real_timestamps() {
-    let mut chain = PrismChain::new(params());
+    // B-11: retargeting is off by default (see `Params::retarget_enabled`'s
+    // doc comment); this test exercises `observe_for_retarget` -> `retarget`
+    // itself, so opt it on explicitly.
+    let mut p = params();
+    p.retarget_enabled = true;
+    let mut chain = PrismChain::new(p);
     let genesis = chain.proposer_genesis;
     let initial_difficulty = chain.params.difficulty;
 
@@ -751,4 +756,49 @@ fn wrong_chain_genesis_parent_is_rejected_not_orphaned() {
     assert!(outcome.missing.is_empty(), "must be rejected outright, not treated as missing a fetch");
     assert!(!chain.orphans.contains_key(&bad_hash), "must not sit in orphans waiting on a parent that will never legitimately arrive");
     assert_eq!(chain.voter_tips[0].1, 0, "chain 0's tip must not have advanced");
+}
+
+/// B-13: the orphan pool is bounded (`MAX_ORPHANS`), evicts oldest-first once
+/// full, and a *retained* (not yet evicted) orphan still resolves normally
+/// once its parent arrives -- the cap doesn't break the ordinary
+/// orphan-resolution path, only bounds it.
+#[test]
+fn orphan_pool_is_bounded_and_a_retained_orphan_still_resolves() {
+    let mut chain = PrismChain::new(params());
+
+    // A real (not-yet-inserted) future parent, so we can construct one
+    // specific orphan whose parent we'll deliver later.
+    let target = voter_block(999_999, 0, chain.voter_genesis[0], vec![]);
+    let target_hash = block_hash(&target.header);
+
+    // Fill well past MAX_ORPHANS with orphans that reference distinct,
+    // never-to-arrive fake parents -- each `unknown_parent(i)` is a distinct
+    // H256, so each of these is itself a distinct orphan (no dedup).
+    fn unknown_parent(i: u64) -> H256 {
+        let mut bytes = [0u8; 32];
+        bytes[..8].copy_from_slice(&i.to_le_bytes());
+        H256::from_slice(&bytes)
+    }
+    const FILL: u64 = 10_100; // MAX_ORPHANS (10_000) + 100 margin
+    for i in 0..FILL {
+        chain.insert_block(voter_block(i, 1, unknown_parent(i), vec![]));
+    }
+    assert!(chain.orphans.len() <= 10_000, "orphan pool must be capped, got {}", chain.orphans.len());
+
+    // Inserted last -- must still be present (eviction is oldest-first).
+    let retained = voter_block(1_000_000, 0, target_hash, vec![]);
+    let retained_hash = block_hash(&retained.header);
+    chain.insert_block(retained);
+    assert!(
+        chain.orphans.contains_key(&retained_hash),
+        "the most-recently-inserted orphan must not have been evicted"
+    );
+
+    // Deliver its parent -- must resolve via drain_orphans, cap notwithstanding.
+    chain.insert_block(target);
+    assert!(
+        !chain.orphans.contains_key(&retained_hash),
+        "a retained orphan must still resolve once its parent arrives"
+    );
+    assert_eq!(chain.voter_tips[0].1, 2, "chain 0's tip must reflect target + the resolved orphan");
 }

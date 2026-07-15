@@ -17,8 +17,16 @@ use argonaut_primitives_prism::{
 };
 use argonaut_prism_db::{columns, BlockStatus, PrismDb};
 use parity_scale_codec::{Decode, Encode};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+
+/// B-13: caps `PrismChain::orphans`. Without this, a PoW-valid block whose
+/// parent/refs never arrive sits in memory forever -- the attacker still
+/// pays real PoW per entry (not a cheap DoS), but it's unbounded and
+/// permanent, a slow memory leak on any long-lived node. `orphan_order`
+/// (insertion order) is what lets eviction be O(1) instead of scanning the
+/// whole map for "oldest".
+const MAX_ORPHANS: usize = 10_000;
 
 /// Per-proposer votes, one per voter chain that has cast one, keyed by chain
 /// id with the *depth* (on that chain) of the block that cast it. Depth is
@@ -100,6 +108,10 @@ pub struct PrismChain {
     pub votes: HashMap<H256, VoteInfo>,
     /// Blocks waiting on missing parent or refs (hash → block).
     pub orphans: HashMap<H256, PrismBlock>,
+    /// B-13: `orphans`' insertion order, for O(1) oldest-first eviction once
+    /// `orphans.len() >= MAX_ORPHANS`. Kept in sync with `orphans` at every
+    /// insert (`insert_orphan`) and every removal (`drain_orphans`).
+    orphan_order: VecDeque<H256>,
     voter_meta: HashMap<H256, VoterMeta>,
     proposer_meta: HashMap<H256, ProposerMeta>,
     db: Option<Arc<PrismDb>>,
@@ -211,6 +223,7 @@ impl PrismChain {
             level_proposer: BTreeMap::new(),
             votes: HashMap::new(),
             orphans: HashMap::new(),
+            orphan_order: VecDeque::new(),
             voter_meta,
             proposer_meta,
             db: None,
@@ -379,6 +392,11 @@ impl PrismChain {
         if self.replaying {
             return;
         }
+        // B-11: off by default -- see `Params::retarget_enabled`'s doc
+        // comment for why per-node retargeting is not consensus-safe.
+        if !self.params.retarget_enabled {
+            return;
+        }
         if let Some(new_target) =
             self.retarget.observe(timestamp_ms, self.params.target_interval_ms, self.params.difficulty)
         {
@@ -387,6 +405,22 @@ impl PrismChain {
                 let _ = db.put_u256(columns::CURRENT_DIFFICULTY_TARGET, b"current", &new_target);
             }
         }
+    }
+
+    /// B-13: insert into `orphans`, evicting the single oldest entry first if
+    /// already at `MAX_ORPHANS`. A block PoW-valid enough to reach here but
+    /// evicted is simply lost (its sender may re-gossip it, or it resolves if
+    /// its parent/refs arrive before it's evicted) -- acceptable: the cap
+    /// exists precisely so no single unresolvable chain of orphans can grow
+    /// without bound.
+    fn insert_orphan(&mut self, hash: H256, block: PrismBlock) {
+        if self.orphans.len() >= MAX_ORPHANS {
+            if let Some(oldest) = self.orphan_order.pop_front() {
+                self.orphans.remove(&oldest);
+            }
+        }
+        self.orphans.insert(hash, block);
+        self.orphan_order.push_back(hash);
     }
 
     /// Main entry point — idempotent block insertion.
@@ -439,7 +473,7 @@ impl PrismChain {
                     self.observe_for_retarget(timestamp_ms);
                     self.maybe_checkpoint();
                 } else {
-                    self.orphans.insert(hash, block);
+                    self.insert_orphan(hash, block);
                 }
             }
 
@@ -471,7 +505,7 @@ impl PrismChain {
                         return outcome;
                     }
                     outcome.missing.push(*voter_parent);
-                    self.orphans.insert(hash, block);
+                    self.insert_orphan(hash, block);
                 } else {
                     self.insert_voter(hash, *chain, *voter_parent, votes.clone());
                     self.persist(&block);
@@ -622,6 +656,11 @@ impl PrismChain {
         if resolved.is_empty() {
             return;
         }
+        // B-13: keep `orphan_order` in sync -- these hashes are about to
+        // leave `orphans` below, so `insert_orphan`'s eviction bookkeeping
+        // must not still count them.
+        let resolved_set: HashSet<H256> = resolved.iter().copied().collect();
+        self.orphan_order.retain(|h| !resolved_set.contains(h));
         for h in resolved {
             if let Some(block) = self.orphans.remove(&h) {
                 self.insert_block(block);

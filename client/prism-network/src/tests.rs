@@ -27,6 +27,7 @@ fn fast_params(m: u16) -> Params {
         f_p: f,
         target_interval_ms: 1_000,
         chain_spec_genesis: H256::zero(),
+        retarget_enabled: false,
     }
 }
 

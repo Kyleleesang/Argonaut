@@ -171,14 +171,24 @@ impl PrismLedger {
     /// constant), so this is "faster when available, never less safe than
     /// stage-1 alone" rather than a fully paper-faithful latency win yet.
     pub fn advance(&mut self, chain: &PrismChain, k: u64) -> Vec<ConfirmedLevel> {
+        self.advance_with_params(chain, k, &confirmation::ConfirmationParams::default())
+    }
+
+    /// Same as [`advance`](Self::advance), but with an explicit
+    /// [`confirmation::ConfirmationParams`] instead of the default (which has
+    /// `stage2_enabled: false` -- see B-12's doc comment on that field). The
+    /// node threads `--prism-stage2` down to this so stage-2 can be
+    /// measured/compared without a rebuild (`node/src/bridge.rs`).
+    pub fn advance_with_params(
+        &mut self,
+        chain: &PrismChain,
+        k: u64,
+        confirmation_params: &confirmation::ConfirmationParams,
+    ) -> Vec<ConfirmedLevel> {
         let mut out = Vec::new();
         loop {
             let next = self.confirmed_tip + 1;
-            let stage2 = confirmation::confirm_unique_leader(
-                chain,
-                next,
-                &confirmation::ConfirmationParams::default(),
-            );
+            let stage2 = confirmation::confirm_unique_leader(chain, next, confirmation_params);
             let Some(leader) = stage2.or_else(|| confirmed_leader_at_level(chain, next, k)) else {
                 break;
             };
@@ -275,3 +285,6 @@ mod adversarial_tests;
 
 #[cfg(test)]
 mod honest_split_tests;
+
+#[cfg(test)]
+mod stage2_latency_tests;

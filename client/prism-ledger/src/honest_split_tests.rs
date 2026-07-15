@@ -1,6 +1,6 @@
 //! B-9 root-cause: "two honest miners never confirm" repro + explanation.
 //!
-//! Earlier live 2-miner devnet testing (see `IMPLEMENTATION_B_PROGRESS.md`)
+//! Earlier live 2-miner devnet testing (see `docs/IMPLEMENTATION_AB_FIXPLAN.md`)
 //! observed 100+ Prism blocks accepted without stage-1 ever confirming a
 //! single level, at a scale where a single miner confirmed within ~60
 //! blocks -- suspected, but not proven, to be the same mechanism as the
@@ -163,12 +163,17 @@ fn any_real_skew_in_an_honest_split_still_resolves_via_stage_2() {
     honest_group_votes_once(&mut chain, &[3], p2_hash, &mut nonce);
 
     let mut ledger = PrismLedger::new(db);
+    // B-12: stage2_enabled is off by default; this test's whole point is that
+    // stage-2 confirms a genuine (even 3-1) skew that stage-1 alone never
+    // would (chain 3 dissents forever), so opt it on explicitly.
+    let confirmation_params =
+        confirmation::ConfirmationParams { stage2_enabled: true, ..Default::default() };
     let mut confirmed_leader = None;
     for _ in 0..50u64 {
         extend_group(&mut chain, &[0, 1, 2], &mut nonce);
         extend_group(&mut chain, &[3], &mut nonce);
 
-        let confirmed = ledger.advance(&chain, 0);
+        let confirmed = ledger.advance_with_params(&chain, 0, &confirmation_params);
         if !confirmed.is_empty() {
             assert_eq!(confirmed.len(), 1);
             confirmed_leader = Some(confirmed[0].leader);

@@ -15,3 +15,6 @@ argonaut-prism-db = { path = "../prism-db" }
 [dev-dependencies]
 tempfile = "3"
 sp-core = { workspace = true, features = ["std"] }
+# B-3: Monte Carlo cross-check of single_check_margin's derivation.
+rand_core = "0.6"
+rand_chacha = "0.3"
