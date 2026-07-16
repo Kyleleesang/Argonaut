@@ -14,13 +14,15 @@ npm install
 npm run dev        # → http://localhost:5173
 ```
 
-It boots immediately with clean PBR spheres and the full postprocessing stack.
-**It is not yet photoreal until you add assets** — that's the point of Path B.
-
-> Heads-up: this scaffold was written without a browser to test in. If `npm run
-> dev` throws, paste the error and it's almost certainly a version-pin or import
-> tweak — the pinned stack (three 0.160 · @react-three/fiber 8 · drei 9 ·
-> postprocessing 2 · React 18) is a known-compatible combination.
+**Status (2026-07-13): full texture set is wired and on disk** (gitignored —
+see ASSETS.md §0 for the re-download inventory). Build + dev server verified.
+Current scene: Prism = 8K lunar surface tinted crystalline (bump relief);
+Aegis = real Saturn + textured ring band + 5,000-rock instanced asteroid
+field (Cassini-style gap); Ecosystem = 8K Earth (day/night/clouds/normal)
+with **Luna orbiting it**; Citadel = neutron star (plasma shader + rotating
+pulsar beams) with a **PBR space station in orbit** (spinning habitat ring,
+solar arrays, nav lights). Galactic ambient fill (ambient + hemisphere
+lights) keeps night sides readable.
 
 ## Go photoreal (in order of impact)
 
@@ -69,15 +71,16 @@ It boots immediately with clean PBR spheres and the full postprocessing stack.
 
 ```
 src/
-  main.jsx        entry
-  App.jsx         Canvas · lighting · postprocessing · camera fly-to · nav HUD
-  NeutronStar.jsx rotating blue neutron star at the origin (the light source)
-  NebulaSky.jsx   stable painterly nebula + starfield backdrop
-  Planet.jsx      PBR body (textured or plain) + atmosphere + rings + pulsar
-  BlackHole.jsx   OPTIONAL lensing background (not wired in — see roadmap)
-  config.js       the system definition (positions, radii, texture slots)
-  index.css       HUD styling
+  main.jsx         entry
+  App.jsx          Canvas · lighting (star + galactic ambient/hemisphere) · camera fly-to · HUD
+  NeutronStar.jsx  neutron star/pulsar: plasma shader, rotating beams, breathing corona
+  SpaceStation.jsx procedural PBR station (hub, spinning habitat ring, solar arrays)
+  NebulaSky.jsx    stable painterly nebula + starfield backdrop
+  Planet.jsx       PBR body + atmosphere + textured rings + asteroid field + orbiting moons
+  BlackHole.jsx    OPTIONAL lensing background (not wired in — see roadmap)
+  config.js        the system definition (positions, radii, texture slots, moons, station)
+  index.css        HUD styling
 public/
-  textures/     ← your planet maps (gitignored; see ASSETS.md)
-  hdr/          ← your environment HDRI (gitignored)
+  textures/     ← planet/station maps (gitignored; inventory in ASSETS.md §0)
+  hdr/          ← environment HDRI (gitignored; not wired, USE_HDRI=false)
 ```

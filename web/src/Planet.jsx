@@ -3,6 +3,7 @@ import { useFrame } from "@react-three/fiber";
 import { useTexture } from "@react-three/drei";
 import * as THREE from "three";
 import { NeutronStar } from "./NeutronStar";
+import { SpaceStation } from "./SpaceStation";
 
 /*
  * A body renders in one of two modes:
@@ -54,6 +55,7 @@ function PlainPlanet({ data }) {
       </mesh>
       {data.atmosphere && <Atmosphere radius={data.radius} atmosphere={data.atmosphere} sunDir={sunDirFor(data.position)} />}
       {data.rings && <Rings radius={data.radius} rings={data.rings} />}
+      {data.moons?.map((m) => <Moon key={m.name} moon={m} />)}
     </group>
   );
 }
@@ -107,6 +109,48 @@ function TexturedPlanet({ data }) {
 
       {data.atmosphere && <Atmosphere radius={data.radius} atmosphere={data.atmosphere} sunDir={sunDirFor(data.position)} />}
       {data.rings && <Rings radius={data.radius} rings={data.rings} />}
+      {data.moons?.map((m) => <Moon key={m.name} moon={m} />)}
+    </group>
+  );
+}
+
+/* ── Moon: a satellite that actually revolves around its parent planet ──────── */
+function MoonMesh({ moon }) {
+  const body = useRef();
+  const maps = useTexture(moon.texture || {});
+  useEffect(() => {
+    if (maps.map) maps.map.colorSpace = THREE.SRGBColorSpace;
+    Object.values(maps).forEach((t) => { if (t && t.isTexture) t.anisotropy = 16; });
+  }, [maps]);
+  useFrame((_, dt) => { if (body.current) body.current.rotation.y += dt * (moon.spin ?? 0.05); });
+  return (
+    <mesh ref={body} castShadow receiveShadow>
+      <sphereGeometry args={[moon.radius, 96, 96]} />
+      <meshStandardMaterial
+        map={maps.map || null}
+        bumpMap={maps.bumpMap || null}
+        bumpScale={moon.bumpScale ?? 0.02}
+        color={moon.color ? new THREE.Color(moon.color) : new THREE.Color("#ffffff")}
+        roughness={moon.roughness ?? 0.95}
+        metalness={moon.metalness ?? 0.0}
+      />
+    </mesh>
+  );
+}
+
+function Moon({ moon }) {
+  const orbit = useRef();
+  // One revolution every `period` seconds, in a plane tilted by `inclination`.
+  useFrame((_, dt) => {
+    if (orbit.current) orbit.current.rotation.y += dt * ((Math.PI * 2) / (moon.period ?? 24));
+  });
+  return (
+    <group ref={orbit} rotation={[moon.inclination ?? 0, 0, 0]}>
+      <group position={[moon.distance, 0, 0]}>
+        <Suspense fallback={null}>
+          <MoonMesh moon={moon} />
+        </Suspense>
+      </group>
     </group>
   );
 }
@@ -126,6 +170,7 @@ function StarBody({ data }) {
         beams={data.beams ?? true}
       />
       <pointLight intensity={data.lightIntensity ?? 1.4} distance={0} decay={0} color={data.emissive ?? "#cfe0ff"} />
+      {data.station && <SpaceStation station={data.station} />}
     </group>
   );
 }

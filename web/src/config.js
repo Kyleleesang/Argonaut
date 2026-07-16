@@ -74,11 +74,26 @@ export const BODIES = [
       emissiveMap: "/textures/earth_night.jpg",   // glows on the dark side
       cloudsMap:   "/textures/earth_clouds.jpg",
     },
+    // A real Moon that revolves around Earth (natural grey lunar surface).
+    moons: [
+      {
+        name: "Luna",
+        radius: 0.55,
+        distance: 4.6,
+        period: 24,        // seconds per orbit
+        spin: 0.04,
+        inclination: 0.32, // tilt of the orbital plane (radians)
+        color: "#c8c8c8",
+        roughness: 0.95,
+        bumpScale: 0.02,
+        texture: { map: "/textures/prism_albedo.jpg", bumpMap: "/textures/prism_albedo.jpg" },
+      },
+    ],
   },
   {
-    name: "Pulsar",
+    name: "Citadel",
     role: "Security",
-    cls: "Neutron star",
+    cls: "Orbital station · neutron star",
     position: [2, 5, 24],
     radius: 0.9,
     color: "#cfe0ff",
@@ -89,10 +104,13 @@ export const BODIES = [
     hot: "#eef3ff",
     glow: "#9fc4ff",
     beamColor: "#dbe8ff",
+    beamLength: 5, // kept short so beams don't wash over the orbiting station
     spin: 1.1,
-    lightIntensity: 1.2,
-    framing: 6,
+    lightIntensity: 1.6,
+    framing: 9,
     accent: "#9fc4ff",
     textures: null,
+    // A futuristic station in orbit around the neutron star.
+    station: { distance: 3.4, period: 46, inclination: 0.42, scale: 0.85 },
   },
 ];

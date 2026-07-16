@@ -49,7 +49,11 @@ export default function App() {
 
         {/* The neutron star at the origin is the system's light (blue-white, hot). */}
         <pointLight position={[0, 0, 0]} intensity={3.4} decay={0} color="#e6ecff" />
-        <ambientLight intensity={0.05} />
+        {/* Faint galactic fill so night sides aren't pure black: cool ambient
+            starlight + a hemisphere term (dim nebula glow from "above", darker
+            below) that mimics scattered light from the rest of the galaxy. */}
+        <ambientLight intensity={0.1} color="#3a4a6b" />
+        <hemisphereLight args={["#4a5488", "#0a1420", 0.3]} />
 
         <Suspense fallback={null}>
           {USE_HDRI && <Environment files="/hdr/space.hdr" background={false} />}

@@ -8,6 +8,31 @@ is code — it's data, and it's the single biggest fidelity lever (see the
 All sources below are free and licensed for this use. **Record attribution** in
 a `CREDITS.md` before shipping publicly (CC BY requires it).
 
+## 0. Current on-disk inventory (2026-07-13) — REPRODUCIBILITY RECORD
+
+`public/textures/` and `public/hdr/` are **gitignored**; this table is the
+only record of what's deployed locally and where to re-download it.
+
+| File | Size/res | Used by (config.js slot) | Source (re-download) | License |
+|---|---|---|---|---|
+| `earth_albedo.jpg` | 8192×4096 | Ecosystem `map` | NASA Blue Marble / solarsystemscope.com | PD / CC BY 4.0 |
+| `earth_normal.jpg` | 8192×4096 | Ecosystem `normalMap` | Solar System Scope | CC BY 4.0 |
+| `earth_night.jpg` | 8192×4096 | Ecosystem `emissiveMap` | NASA Black Marble / SSS | PD / CC BY 4.0 |
+| `earth_clouds.jpg` | 8192×4096 | Ecosystem `cloudsMap` | Solar System Scope | CC BY 4.0 |
+| `prism_albedo.jpg` | 8192×4096 | Prism `map`+`bumpMap`; Luna moon `map`+`bumpMap` | solarsystemscope.com/textures/download/8k_moon.jpg | CC BY 4.0 |
+| `aegis_albedo.jpg` | 4096×2048 | Aegis `map` | …/download/8k_saturn.jpg (served at 4K) | CC BY 4.0 |
+| `saturn_ring_alpha.png` | 8192×500 RGBA | Aegis `rings.texture` (alpha = gaps) | …/download/8k_saturn_ring_alpha.png | CC BY 4.0 |
+| `station_hull_diff.jpg` | 2048² | SpaceStation hull `map` | dl.polyhaven.org …/metal_plate/metal_plate_diff_2k.jpg | CC0 |
+| `station_hull_nor.jpg` | 2048² | SpaceStation `normalMap` (nor_gl) | Poly Haven metal_plate | CC0 |
+| `station_hull_rough.jpg` | 2048² | SpaceStation `roughnessMap` | Poly Haven metal_plate | CC0 |
+| `station_hull_metal.jpg` | 2048² | SpaceStation `metalnessMap` | Poly Haven metal_plate | CC0 |
+| `hdr/space.hdr` | 73 MB | not wired (`USE_HDRI = false` in App.jsx) | Poly Haven milky-way HDRI | CC0 |
+
+Notes: the ring PNG's **own alpha channel** carries the gap mask — use `map`
+only, NOT `alphaMap` (its green channel would flatten opacity to ~34%).
+Earth roughness/specular map: not available from SSS (404 at 8K and 2K);
+deliberately omitted.
+
 ## 1. HDRI environment (image-based lighting) — do this first
 
 IBL gives real reflections + ambient and is the fastest jump toward "real."
