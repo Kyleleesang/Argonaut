@@ -219,12 +219,10 @@ dependencies = [
  "argonaut-prism-miner",
  "argonaut-prism-network",
  "argonaut-runtime",
+ "argonaut-signer-core",
  "async-channel 1.8.0",
  "async-trait",
- "blake3",
- "chacha20poly1305",
  "clap",
- "fn-dsa",
  "frame-benchmarking",
  "frame-benchmarking-cli",
  "frame-system",
@@ -351,6 +349,8 @@ dependencies = [
  "argonaut-prism-db",
  "blake3",
  "parity-scale-codec",
+ "rand_chacha 0.3.1",
+ "rand_core 0.6.4",
  "sp-core",
  "tempfile",
 ]
@@ -428,6 +428,38 @@ dependencies = [
  "sp-transaction-pool",
  "sp-version",
  "substrate-wasm-builder",
+]
+
+[[package]]
+name = "argonaut-signer-core"
+version = "0.1.0"
+dependencies = [
+ "argonaut-primitives-falcon",
+ "blake2 0.10.6",
+ "blake3",
+ "bs58",
+ "chacha20poly1305",
+ "fn-dsa",
+ "hex",
+ "parity-scale-codec",
+ "rand_chacha 0.3.1",
+ "rand_core 0.6.4",
+ "serde",
+ "serde_json",
+ "sp-core",
+ "sp-runtime",
+]
+
+[[package]]
+name = "argonaut-signer-wasm"
+version = "0.1.0"
+dependencies = [
+ "argonaut-signer-core",
+ "getrandom 0.2.17",
+ "hex",
+ "rand_core 0.6.4",
+ "serde_json",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -3444,8 +3476,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff2abc00be7fca6ebc474524697ae276ad847ad0a6b3faa4bcb027e9a4614ad0"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "wasi",
+ "wasm-bindgen",
 ]
 
 [[package]]

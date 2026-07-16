@@ -1,0 +1,19 @@
+[package]
+name = "argonaut-signer-wasm"
+version = "0.1.0"
+edition = "2021"
+license = "Unlicense"
+description = "wasm-bindgen wrapper over argonaut-signer-core — the @argonaut/signer browser package (FRONTEND_DAPP_SPEC §4)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+argonaut-signer-core = { path = "../signer-core" }
+wasm-bindgen = "0.2"
+serde_json = { workspace = true }
+rand_core = { version = "0.6", features = ["getrandom"] }
+# `js` routes OsRng to crypto.getRandomValues in the browser (spec §4.3:
+# entropy never comes from a JS PRNG).
+getrandom = { version = "0.2", features = ["js"] }
+hex = "0.4"

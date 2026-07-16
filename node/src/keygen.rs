@@ -6,26 +6,17 @@
 //! `sc-cli`) and cannot be extended, so this is a bespoke subcommand rather than a
 //! plugin into the stock one.
 //!
-//! If `--passphrase` is given, the signing key is encrypted at rest (ChaCha20-Poly1305,
-//! key derived from the passphrase via `blake3::derive_key`) before being written.
-//! Without one, the file is written in the clear with a loud warning — convenient for
-//! throwaway devnet accounts, unsafe for anything real.
+//! Keygen, keystore sealing (ChaCha20-Poly1305 under a `blake3::derive_key`-derived
+//! key when `--passphrase` is given), and address derivation live in
+//! `argonaut-signer-core` (`wallet/signer-core`), shared byte-for-byte with the
+//! browser signer (`wallet/signer-wasm`); this module is the clap shell + file I/O.
 
-use argonaut_primitives_falcon::blake3_hash;
-use chacha20poly1305::{
-    aead::{Aead, KeyInit},
-    ChaCha20Poly1305, Nonce,
-};
+use argonaut_signer_core::{generate_keypair, keystore};
 use clap::Parser;
-use fn_dsa::{
-    sign_key_size, vrfy_key_size, KeyPairGenerator, KeyPairGeneratorStandard, FN_DSA_LOGN_512,
-};
 use rand_core::{OsRng, RngCore, SeedableRng};
-use serde::{Deserialize, Serialize};
-use sp_core::crypto::{AccountId32, Ss58Codec};
 use std::path::PathBuf;
 
-const KDF_CONTEXT: &str = "argonaut-falcon-keystore-v1";
+pub use argonaut_signer_core::keystore::FalconKeystoreFile;
 
 #[derive(Debug, clap::Subcommand)]
 pub enum FalconKeySubcommand {
@@ -62,72 +53,21 @@ pub struct FalconKeyInspectCmd {
     pub keystore_path: PathBuf,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct FalconKeystoreFile {
-    /// SS58-encoded AccountId (`blake3(public_key)`).
-    pub address: String,
-    #[serde(with = "hex::serde")]
-    pub public_key: Vec<u8>,
-    /// `true` if `secret_key` is ChaCha20-Poly1305-encrypted (see `kdf_salt`/`nonce`),
-    /// `false` if it's the raw signing key.
-    pub encrypted: bool,
-    #[serde(with = "hex::serde")]
-    pub secret_key: Vec<u8>,
-    #[serde(with = "hex::serde")]
-    pub kdf_salt: Vec<u8>,
-    #[serde(with = "hex::serde")]
-    pub nonce: Vec<u8>,
-}
-
 impl FalconKeyGenerateCmd {
     pub fn run(&self) -> Result<(), String> {
         let mut seed = [0u8; 32];
         OsRng.fill_bytes(&mut seed);
         let mut rng = rand_chacha::ChaCha20Rng::from_seed(seed);
+        let keypair = generate_keypair(&mut rng);
 
-        let mut kg = KeyPairGeneratorStandard::default();
-        let mut sign_key = vec![0u8; sign_key_size(FN_DSA_LOGN_512)];
-        let mut vrfy_key = vec![0u8; vrfy_key_size(FN_DSA_LOGN_512)];
-        kg.keygen(FN_DSA_LOGN_512, &mut rng, &mut sign_key, &mut vrfy_key);
-
-        let account = AccountId32::from(blake3_hash(&vrfy_key));
-        let address = account.to_ss58check();
-
-        let (secret_key, kdf_salt, nonce, encrypted) = match &self.passphrase {
-            Some(passphrase) => {
-                let mut salt = [0u8; 16];
-                OsRng.fill_bytes(&mut salt);
-                let mut nonce_bytes = [0u8; 12];
-                OsRng.fill_bytes(&mut nonce_bytes);
-
-                let mut key_material = salt.to_vec();
-                key_material.extend_from_slice(passphrase.as_bytes());
-                let derived_key = blake3::derive_key(KDF_CONTEXT, &key_material);
-
-                let cipher = ChaCha20Poly1305::new((&derived_key).into());
-                let ciphertext = cipher
-                    .encrypt(Nonce::from_slice(&nonce_bytes), sign_key.as_ref())
-                    .map_err(|_| "failed to encrypt signing key".to_string())?;
-
-                (ciphertext, salt.to_vec(), nonce_bytes.to_vec(), true)
-            },
-            None => {
-                eprintln!(
-                    "warning: no --passphrase given; writing the signing key UNENCRYPTED. \
-                     Only use this for throwaway devnet accounts."
-                );
-                (sign_key, Vec::new(), Vec::new(), false)
-            },
-        };
-
-        let file = FalconKeystoreFile {
-            address: address.clone(),
-            public_key: vrfy_key,
-            encrypted,
-            secret_key,
-            kdf_salt,
-            nonce,
-        };
+        if self.passphrase.is_none() {
+            eprintln!(
+                "warning: no --passphrase given; writing the signing key UNENCRYPTED. \
+                 Only use this for throwaway devnet accounts."
+            );
+        }
+        let file = keystore::seal(&keypair, self.passphrase.as_deref(), &mut OsRng)?;
+        let address = file.address.clone();
 
         std::fs::create_dir_all(&self.output_dir).map_err(|e| e.to_string())?;
         let path = self.output_dir.join(format!("{address}.falcon.json"));

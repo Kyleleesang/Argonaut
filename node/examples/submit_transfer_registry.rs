@@ -26,30 +26,13 @@
 //! moves and `CheckFalconSignature` itself drops out) the old `SignedPayload` shape
 //! `submit_transfer.rs` uses for bootstrap mode.
 use argonaut_runtime as runtime;
-use fn_dsa::{signature_size, SigningKey, SigningKeyStandard, DOMAIN_NONE, HASH_ID_RAW};
+use argonaut_signer_core::keystore::FalconKeystoreFile;
 use parity_scale_codec::Encode;
 use rand_core::OsRng;
-use serde::Deserialize;
 use serde_json::{json, Value};
 use sp_core::bounded::BoundedVec;
 use sp_core::crypto::{AccountId32, Ss58Codec};
 use std::process::Command;
-
-/// Same on-disk shape as `node/src/keygen.rs::FalconKeystoreFile` -- deliberately not
-/// importing that type directly (this is a separate `[[example]]` binary target, not
-/// linked against the node's own binary crate), just its JSON shape.
-#[derive(Deserialize)]
-struct FalconKeystoreFile {
-    #[serde(with = "hex::serde")]
-    public_key: Vec<u8>,
-    encrypted: bool,
-    #[serde(with = "hex::serde")]
-    secret_key: Vec<u8>,
-    #[serde(with = "hex::serde")]
-    kdf_salt: Vec<u8>,
-    #[serde(with = "hex::serde")]
-    nonce: Vec<u8>,
-}
 
 fn rpc(url: &str, method: &str, params: Value) -> Value {
     let body = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).to_string();
@@ -79,19 +62,9 @@ fn main() {
 
     let json = std::fs::read_to_string(keystore_path).expect("failed to read keystore file");
     let file: FalconKeystoreFile = serde_json::from_str(&json).expect("invalid keystore JSON");
-    let sign_key = if file.encrypted {
-        use chacha20poly1305::{aead::{Aead, KeyInit}, ChaCha20Poly1305, Nonce};
-        let passphrase = passphrase.expect("keystore is encrypted; pass the passphrase as the 2nd argument");
-        let mut key_material = file.kdf_salt.clone();
-        key_material.extend_from_slice(passphrase.as_bytes());
-        let derived_key = blake3::derive_key("argonaut-falcon-keystore-v1", &key_material);
-        let cipher = ChaCha20Poly1305::new((&derived_key).into());
-        cipher
-            .decrypt(Nonce::from_slice(&file.nonce), file.secret_key.as_ref())
-            .expect("failed to decrypt signing key: wrong passphrase?")
-    } else {
-        file.secret_key.clone()
-    };
+    let sign_key = file
+        .open(passphrase.map(String::as_str))
+        .unwrap_or_else(|e| panic!("{e} (pass the passphrase as the 2nd argument)"));
 
     let sender_account = AccountId32::from(argonaut_primitives_falcon::blake3_hash(&file.public_key));
     let sender_ss58 = sender_account.to_ss58check();
@@ -144,11 +117,9 @@ fn main() {
 
     const EXTENSION_VERSION: u8 = 0; // matches `UncheckedExtrinsic::new_transaction`'s constant
     let signing_payload = (EXTENSION_VERSION, &call, &tail_extra, &tail_implicit).encode();
-    let msg_hash = argonaut_primitives_falcon::blake3_hash(&signing_payload);
-
-    let mut sk = SigningKeyStandard::decode(&sign_key).expect("keystore signing key is corrupt or wrong length");
-    let mut sig_bytes = vec![0u8; signature_size(sk.get_logn())];
-    sk.sign(&mut OsRng, &DOMAIN_NONE, &HASH_ID_RAW, &msg_hash, &mut sig_bytes);
+    // `sign_payload` signs over blake3(signing_payload) — same msg_hash as before.
+    let sig_bytes = argonaut_signer_core::sign_payload(&sign_key, &signing_payload, &mut OsRng)
+        .unwrap_or_else(|e| panic!("{e}"));
 
     let extra: runtime::SignedExtra = (
         runtime::CheckFalconSignature::registry_mode(

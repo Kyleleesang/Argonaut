@@ -20,6 +20,8 @@ members = [
     "client/prism-ledger",
     "client/aggregator",
     "client/argonaut-store",
+    "wallet/signer-core",
+    "wallet/signer-wasm",
 ]
 
 [profile.release]
