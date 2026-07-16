@@ -9,25 +9,44 @@ proceeds; it is the running counterpart to the spec.
 
 ## Milestone status
 
-**Current checkpoint (2026-07-09):** **D2 CODE-COMPLETE + runtime wasm build
-GREEN.** All four pallets implemented + wired into the runtime (D.4–D.8).
-**49 pallet unit tests green** (provider-registry 11, storage-deals 13,
-storage-proofs 13, payment-channels 10 — counts exclude the 2 macro-generated
-integrity tests per pallet), all using REAL bao slices / Falcon vouchers (no
-proof mocking, spec D.12). **`cargo build -p argonaut-runtime` finished clean in
-4m33s** — all four pallets compiled in BOTH std and the `no_std` wasm graph (the
-D.14 feature-gate trap is clear); only 3 pre-existing `create_runtime_str`
-deprecation warnings, unrelated to D2. **`cargo build -p argonaut-node` also green
-(exit 0)** and **`cargo test -p argonaut-runtime` green (10/10)** — the full node
-binary links and the runtime + wiring pass. Still owed: a live devnet
-block-production check (C-D2.1). **Committed 2026-07-09** (branch `Base`).
+**Current checkpoint (2026-07-16):** **D2 FULLY DONE, including the live devnet
+check.** All four pallets implemented + wired into the runtime (D.4–D.8), 49
+pallet unit tests green, runtime wasm build green, node binary green. The
+previously-owed C-D2.1/C-D2.2 live-verification is now done (see below) —
+D2 has nothing left.
 
 | Milestone | State | Notes |
 |---|---|---|
 | **D1** — `primitives/storage` + `argonaut-store encode` + host-fn reg | ✅ **DONE — 14/14 tests + node compiles** | committed |
-| **D2** — pallets (registry/deals/proofs/channels) + runtime wiring | 🟢 **CODE-DONE — 49 pallet tests + runtime tests + wasm + node binary all green; devnet check pending** | committed |
+| **D2** — pallets (registry/deals/proofs/channels) + runtime wiring | ✅ **DONE — 49 pallet tests + runtime tests + wasm + node binary all green + live devnet check green** | committed |
 | D3 — chain-client + provider daemon | not started | P-D3 (needs iroh) |
 | D4/D5 — retrieval + repair | not started | P-D4 |
+
+### C-D2.1/C-D2.2 live devnet verification — DONE 2026-07-16
+
+Live-verified on a single-node `--dev` devnet using a temporary,
+never-committed build (`EPOCH_DURATION_BLOCKS` locally edited 100→5, and a
+`build-spec`-generated chain-spec JSON with `prismMVoterChains` lowered
+100→4 to make first confirmation tractable in minutes rather than the
+~10+ minutes a single miner needs at the real m=100 default — both reverted
+before committing; the beacon/`on_initialize` logic under test is identical
+regardless of either value).
+
+- **16 Substrate blocks imported, crossing 3 full epoch boundaries (5, 10,
+  15), zero panics, zero errors** in the node log throughout.
+- Queried `StorageProofs::Beacons` directly via `state_getKeysPaged`/
+  `state_getStorage` RPC (manual `twox128` prefix key, no chain-client
+  needed yet): **3 beacon entries existed** (epochs 1–3, key suffixes
+  `01000000`/`02000000`/`03000000`).
+- **Epoch 1's beacon == the genesis hash** — exactly the C-D2.2-documented
+  edge case (`BeaconDelay=10` exceeds epoch 1's boundary block `5`, so the
+  saturating subtraction reads block 0). Confirmed harmless, as designed.
+- **Epoch 3's beacon byte-exactly equals `chain_getBlockHash(5)`**
+  (`boundary block 15 − BeaconDelay 10 = 5`) — a precise, not just
+  plausible, confirmation that the beacon snapshot computes exactly the
+  documented formula.
+
+C-D2.1 and C-D2.2 are closed. Nothing else in D2 is owed.
 
 ### D2 detail (2026-07-09)
 - **Four pallets**, each `lib.rs + mock.rs + tests.rs + benchmarking.rs +
@@ -141,18 +160,13 @@ block-production check (C-D2.1). **Committed 2026-07-09** (branch `Base`).
 
 ## Concerns / open questions (watch these)
 
-- **C-D2.1 — Devnet block production (live-verification, STILL OWED).** ✅ The
-  runtime wasm build is green (4m33s, 0 errors) — the D.14 no_std trap is clear.
-  ⏳ Still owed per the repo rule: run a devnet and confirm blocks still produce
-  with the 4 pallets wired + the `storage-proofs::on_initialize` beacon hook
-  live (it now runs every block). Watch for: the beacon snapshot not panicking
-  on early blocks (target hash may be genesis/zero — see C-D2.2), and no weight/
-  execution regressions. The node binary build was kicked off right after the
-  runtime; confirm it too.
-- **C-D2.2 — Beacon `on_initialize` is the only always-run hook in D.** It reads
-  `block_hash(n - BeaconDelay)` each epoch boundary. On a fresh devnet the first
-  `BeaconDelay` blocks' target hash may be genesis/zero — harmless (epoch-0 deals
-  start challenges at epoch 1). Confirm on devnet that beacons become non-zero.
+- **C-D2.1 — Devnet block production (live-verification).** ✅ **RESOLVED
+  2026-07-16** — see the checkpoint section above. 16 blocks, 3 epoch
+  boundaries, zero panics/errors.
+- **C-D2.2 — Beacon `on_initialize` is the only always-run hook in D.** ✅
+  **RESOLVED 2026-07-16** — confirmed live: epoch 1's beacon reads genesis
+  (harmless, as designed) and epoch 3's beacon byte-exactly matches
+  `chain_getBlockHash(epoch_3_boundary - BeaconDelay)`.
 - **C-D2.3 — Slash beneficiary dead-account (see B-D2.1).** `report_missed`
   splits the slash 50/50 to reporter + client. If either is a fresh account below
   ED, that half silently fails to move (remainder returned, ignored). Devnet-OK;
