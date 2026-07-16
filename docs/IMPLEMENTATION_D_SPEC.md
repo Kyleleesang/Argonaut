@@ -33,12 +33,16 @@ document for what to actually type.
     `ExtendHostFunctions` tuple in `node/src/service.rs`.
   - Cargo feature plumbing: copy `pallets/falcon-registry/Cargo.toml`'s
     `std` / `runtime-benchmarks` feature lists.
-- The bridge embeds `LeaderDigest { level: u64, leader: H256 }` as a
-  `DigestItem::Other` **post-digest** (`node/src/bridge.rs`). Post-digests are
-  merged after block-building, so **the runtime cannot read the leader hash
-  during execution**. This kills §9.5's beacon design as written — see D.6.1
-  for the replacement (epoch-snapshotted block hash; the block hash commits to
-  the leader digest anyway because the digest is part of the header).
+- ~~The bridge embeds `LeaderDigest` as a `DigestItem::Other` **post-digest**,
+  so the runtime cannot read the leader hash during execution~~ — **STALE
+  (corrected 2026-07-16):** the 2026-07-07 B-1/AF-4 fix changed the leader
+  digest to `DigestItem::PreRuntime` set *before* block-building
+  (`with_inherent_digests`), so the runtime *can* now read it during
+  execution. D.6.1's epoch-snapshotted block-hash beacon was chosen under the
+  old constraint; it remains valid (the block hash commits to the digest,
+  which is in the header) and is what D2 implemented — but a future direct
+  leader-hash beacon is no longer impossible, and any new design decision
+  should not cite the old constraint.
 
 ## D.1 Global rules for the implementing model
 
@@ -423,9 +427,19 @@ NextDealId: StorageValue<DealId>
   `Faulted` + `fault_epoch = current_epoch`, `faulted_count += 1`, removes
   `DealProviders` entry (so a replacement — or even the same provider — can
   re-accept), `note_assignment_ended`, `note_fault`; if
-  `n - faulted_count < k`: state -> `Lost` (terminal; escrow unreserved to
-  client immediately, remaining providers keep claim rights via
-  `claim_earnings` until `close_deal`); else state `Active -> Degraded`.
+  `n - faulted_count < k`: state -> `Lost` (terminal; remaining providers keep
+  claim rights via `claim_earnings` until `close_deal`). **Correction
+  2026-07-16:** an earlier revision said escrow is "unreserved to the client
+  immediately" at `Lost` — that would be a bug, and the implemented pallet
+  correctly does NOT do it: `ReservableCurrency` pools all of an account's
+  reserves, so unreserving while providers can still `claim_earnings` (which
+  uses `repatriate_reserved`) would let those claims drain reserves belonging
+  to the client's *other* deals. Escrow stays reserved until `close_deal`,
+  exactly as implemented. (Known consequence, open recommendation: a deal
+  Lost at epoch 1 of a long duration still locks the client's escrow until
+  `end_epoch + CloseGraceEpochs`; consider allowing `close_deal` for `Lost`
+  deals at `lost_epoch + CloseGraceEpochs` instead — needs a stored
+  `lost_epoch`.) Else state `Active -> Degraded`.
 
 Events (one per transition, with ids): `DealCreated`, `ShardAccepted`,
 `ShardActivated`, `DealActive`, `AssignmentExpired`, `EarningsClaimed`,

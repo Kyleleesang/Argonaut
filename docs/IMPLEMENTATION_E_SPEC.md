@@ -59,6 +59,17 @@ ship to a real network so their parameters are governable.
 8. **Docs discipline:** each milestone updates `docs/ARCHITECTURE.md` §2
    (crate map) and the baseline table in `POTENTIAL_PALLET_INTEGRATIONS.md`
    §0 when the runtime pallet set changes.
+9. **(Added 2026-07-16) Mainnet-value launch is gated on FIPS 206 final +
+   `fn-dsa` 1.0.** The chain's Falcon verifier (`fn-dsa`, pinned 0.2.0) is
+   pre-standard by its author's own declaration; keys/signatures may cease to
+   be accepted by later versions until 1.0 (expected after FIPS 206 final,
+   late 2026/early 2027). E0–E2 may take a chain to *testnet* freely, but no
+   milestone in this spec authorizes launching real value before that gate —
+   and any post-launch scheme migration requires keeping the legacy verify
+   host function forever (historical re-sync), a `verify_v2` host fn, and a
+   dual-scheme window. This was project policy before this spec was written
+   (see `FRONTEND_DAPP_SPEC.md` §10's risk row) and belongs here as a rule,
+   not buried in a frontend risk table.
 
 ## E.1 Baseline (what exists today, verified against `runtime/src/lib.rs` 2026-07-09)
 
@@ -74,7 +85,7 @@ ship to a real network so their parameters are governable.
 | Chain specs | `development_config` / `local_testnet_config` from `//Alice`-style seeds; `GenesisBuilder::preset_names() == []` | needs E0 |
 | Node RPC | `substrate-frame-rpc-system` + `pallet-transaction-payment-rpc` wired (`node/src/rpc.rs`) | baseline OK; E4 adds contracts RPC, E5 hardens |
 | SS58 prefix | 42 (generic Substrate) | needs E0 registration |
-| Packaging | `docker-compose.yml` + B-10 fixplan item pending | E5 references, does not duplicate |
+| Packaging | B-10 **done 2026-07-14**: real multi-stage `Dockerfile` + 3-node compose devnet, live-verified | E5 extends (testnet-in-a-box profile), does not duplicate |
 
 ## E.2 Milestone map
 
@@ -140,6 +151,14 @@ launchable* with real keys and real allocations.
    `sp_genesis_builder::GenesisBuilder` (`preset_names()` currently returns
    `[]`): `dev`, `local`, `testnet`, `mainnet-stub`. Dev/local keep derived
    accounts; `testnet`/`mainnet-stub` take real Falcon public keys.
+   **(Added 2026-07-16, postdates this spec:** B-16 moved the Prism consensus
+   parameters into chain-spec `properties` — `prismMVoterChains`,
+   `prismDifficultyShift`, `prismTargetIntervalMs`, `prismKDeepConfirmation`,
+   set via `chain_spec.rs`'s `prism_properties()`. Every new preset/spec MUST
+   carry these keys: `prism_params_from_properties` falls back to compiled
+   defaults *silently, per-field* if a key is missing, so an omission pins the
+   network to defaults with no error. Add a test asserting every preset's
+   properties contain all prism keys.**)**
 2. **Key ceremony tooling:** `node/src/keygen.rs` already generates Falcon
    keys; add a documented offline procedure (docs, not code, until the tool
    gap is proven): generate N root/treasury/council keys air-gapped, record
@@ -316,9 +335,10 @@ Config decisions:
   stripped). Add Prism-bridge metrics (levels confirmed, bridge lag, emitted
   tx-hash count) — the bridge is Argonaut's novel component and currently
   observable only via logs.
-- **Packaging:** finish fixplan **B-10** (docker-compose devnet artifact) —
-  tracked there, referenced here, not duplicated. Extend to a
-  `testnet-in-a-box` compose profile using the E0 `testnet` preset.
+- **Packaging:** fixplan **B-10** is done (2026-07-14: multi-stage
+  `Dockerfile` + 3-node compose devnet, live-verified). E5's work is the
+  extension only: a `testnet-in-a-box` compose profile using the E0
+  `testnet` preset.
 - **Upgrade discipline:** CI job running `try-runtime-cli
   on-runtime-upgrade` against a live devnet/testnet snapshot before any
   `set_code` referendum; the `try-runtime` runtime API already exists.

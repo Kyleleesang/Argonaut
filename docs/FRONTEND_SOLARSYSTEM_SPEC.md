@@ -1,6 +1,10 @@
 # Argonaut Frontend — Solar-System Experience Spec
 
-**Status: plan / documentation (2026-07-09), no code.** A build plan for the
+**Status: spec (2026-07-09); substantially BUILT as of 2026-07-13** — `web/`
+implements the scene (real PBR textures, pulsar core, Luna, Citadel station;
+see `web/ASSETS.md`), build+serve verified. This document remains the
+normative reference for the not-yet-built parts (SSR/Astro wrap, a11y pass,
+audio, deploy pipeline). Originally: a build plan for the
 public-facing Argonaut website as an explorable 3D solar system: the network
 is the star, each technology pillar is a planet, each dApp is a moon, and
 selecting a section flies the camera to that world and drops into an orbiting

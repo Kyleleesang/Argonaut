@@ -6,10 +6,13 @@
 >
 > **Implementation B: CLOSED for everything with a concrete fix.** All B-1
 > through B-16 findings (original review + the 2026-07-10 fresh-eyes audit)
-> are either done or are an explicit, still-open ⚠️ design decision — see
-> "Open work" below. `docs/IMPLEMENTATION_B_PROGRESS.md` was deleted for the
-> same reason as A's tracker (fully superseded by this doc + git log; its
-> milestone table lived on in `ARGONAUT_ARCHITECTURE_GUIDE.md` §3.9 anyway).
+> are done. The two former ⚠️ design decisions were both decided 2026-07-16:
+> B-11's real fix is spec'd ([`PRISM_RETARGET_SPEC.md`](./PRISM_RETARGET_SPEC.md),
+> implementation deliberately deferred) and B-15 is a Sonnet-ready execute
+> item — see "Open work" below. `docs/IMPLEMENTATION_B_PROGRESS.md` was
+> deleted for the same reason as A's tracker (fully superseded by this doc +
+> git log; its milestone table lived on in `ARGONAUT_ARCHITECTURE_GUIDE.md`
+> §3.9 anyway).
 
 Read [`IMPLEMENTATION_AB_REVIEW.md`](./IMPLEMENTATION_AB_REVIEW.md) for the *why* behind any finding ID below. This file is the current *to-do list* — history of what was already fixed lives in git log, not here.
 
@@ -46,11 +49,31 @@ Read [`IMPLEMENTATION_AB_REVIEW.md`](./IMPLEMENTATION_AB_REVIEW.md) for the *why
 
 ## Open work
 
-### Design decisions — ⚠️ do not implement without the user's sign-off (ground rule 3)
+### B-11 real fix — decided 2026-07-16: spec written, implementation deliberately deferred
 
-**B-11 real fix (🔴 CRITICAL for genuine multi-machine/adversarial-timing deployment):** the interim fix (fixed difficulty, retarget disabled by default) is safe and live-verified (zero `SortitionMismatch` across the B-10 runs), but it's a stopgap — difficulty can't adapt to real hash-rate changes. The real fix: make `difficulty` a pure function of *canonical* state. The confirmed leader sequence is identical on every node by construction (`columns::PROPOSER_LEADER_SEQUENCE`, written by `PrismLedger::advance`); drive retargeting from leader-block timestamps *along that sequence* (in `advance`, not in `insert_block`), changing difficulty only at deterministic confirmed-level boundaries. The hard part: `validate_block` must check a block's PoW/sortition *before* it's confirmed, so the expected difficulty for a not-yet-confirmed block's era must itself be derivable from already-confirmed state — needs a real epoch-scheme design keyed to confirmed level, plus a median-time-past timestamp bound (B-14, folded in here). Bring the user a written design before implementing.
+The design is written up in [`PRISM_RETARGET_SPEC.md`](./PRISM_RETARGET_SPEC.md) (epoch-based difficulty derived from the canonical confirmed-leader sequence, one-epoch activation lag, MTP timestamp clamping folding in B-14, cumulative-work fork choice, position-bound epoch declaration, rate floor from the shift-14 finding). **Do not implement until a multi-machine testnet exists to soak it** — the user approved this as spec-only; the interim fix (fixed chain-spec difficulty, `retarget_enabled: false`) covers every current deployment. When picking it up, the spec's "hard parts" section is the checklist; every item there is load-bearing.
 
-**B-15 threshold decision (🟡 MED liveness):** `confirmed_leader_at_level` requires unanimity of all m voter chains, so a single censored/offline/slow chain stalls all stage-1 confirmation (B-4's tests make this concrete: never confirms within 200 rounds against 8/100 silent chains). The correct fix is *not* a guessed fraction — it's B-3's real, now-derived confidence margin (`single_check_margin` + `example_single_check_confirmation_params_beta025_eps1e6()`), already unit- and Monte Carlo-verified but only available opt-in, not wired in as `ConfirmationParams::default()`. Making it the operational default (or exposing β/ε as chain-spec/CLI params) is a security-parameter choice — bring it to the user rather than flipping it silently.
+### B-15 — decided 2026-07-16 (user sign-off): make the derived margin the default; EXECUTE (Sonnet-ready)
+
+**Decision:** keep stage-1 (`confirmed_leader_at_level`) unanimous and untouched — it stays the fast path. Flip stage-2 to **on by default with B-3's real margin** (`single_check_margin`), replacing the placeholder in the operational path. β and ε become chain-spec properties.
+
+**Corrected framing (matters for expectations, discovered 2026-07-16 re-reading the margin's own docs):** at m=100 the derived margin is *vacuous below ~400-deep votes* (`ρ≥1`; the curve self-gates — see `example_single_check_confirmation_params_beta025_eps1e6`'s doc comment). So with the real margin, stage-2 is **not** a latency win at m=100 — it's a provably-safe *eventual backstop*: when stage-1 stalls forever on silent chains (the B-15 hole), stage-2 confirms once the surviving chains' votes get a few hundred blocks deep (hours, not never). When stage-1 works, it fires first and stage-2 costs nothing — the existing race in `advance` already picks whichever confirms first. The B-4 tests' "round-1 stage-2 confirmation" came from the *placeholder* margin; do not expect that from the real one. (Faster stage-2 at fixed ε needs larger m or a smaller assumed β — both chain-spec choices now.)
+
+**Steps (restate ground rules; batch the edits, one test pass at the end):**
+
+1. `client/prism-ledger/src/confirmation.rs`: replace `pub delta_d: DeltaDFn` in `ConfirmationParams` with a policy enum so runtime β/ε can parametrize it (a bare `fn` pointer can't capture chain-spec values):
+   ```rust
+   pub enum MarginPolicy {
+       Custom(DeltaDFn),                            // test hook; placeholder_delta_d lives on here
+       SingleCheck { beta: f64, eps_target: f64 },  // B-3 derived margin
+   }
+   ```
+   `lower_bound_from_depths` computes the margin via `match`. New `Default`: `{ k_min: 1, margin: SingleCheck { beta: ASSUMED_ADVERSARY_FRACTION, eps_target: 1e-6 }, stage2_enabled: true }`. Rewrite the `stage2_enabled` field's doc comment — its current text ("off by default", placeholder rationale) becomes false with this change. Update `example_single_check_confirmation_params_beta025_eps1e6` to construct via the enum (it stops needing its nested `fn`).
+2. **Test triage, explicit:** shallow unit tests are naturally unaffected (the real margin is vacuous at their depths, and stage-1 fallback still fires), but any test that *specifically exercises stage-2 confirming at shallow depth* must pin `margin: MarginPolicy::Custom(placeholder_delta_d)` with a one-line comment that it tests the rule structure, not the calibrated margin: the 4 `confirm_unique_leader` tests in `confirmation/tests.rs`, both `stage2_latency_tests.rs` tests, `persistent_balancing_attacker_stalls_stage1_alone_but_not_the_system`, `any_real_skew_in_an_honest_split_still_resolves_via_stage_2`. Expect exactly these; investigate any *other* failure as real.
+3. `node/src/chain_spec.rs`: add `prismBetaPercent` (u64, default 25) and `prismEpsExponent` (u64, default 6 ⇒ ε=1e-6) to `prism_property_keys`/`PrismChainSpecParams`/`prism_properties`/`prism_params_from_properties`, mirroring the existing four properties (integers, not floats, for JSON robustness). Extend the 4 existing chain_spec tests to cover them.
+4. CLI: replace `--prism-stage2` with `--prism-no-stage2` (repo is pre-release; the old flag is one day old — swap it, don't alias). `service.rs` builds the full `ConfirmationParams` from chain-spec β/ε + `stage2_enabled: !cli.prism_no_stage2` and passes the *struct* into `run_prism_bridge` (replacing today's lone `stage2_enabled: bool` parameter and the bridge's internal `ConfirmationParams` construction).
+5. **ε sizing note (put in `confirmation.rs`'s module doc):** ε is a per-check permanent-split probability (the bridge finalizes with no reorg path). At 1e-6/check it's fine for a devnet; anything holding real value should move `prismEpsExponent` to ≥9 (the margin floor grows only logarithmically: `−ln(ε)/m` = 13.8%→20.7% at m=100 going 1e-6→1e-9). Optional hardening, separate commit if done: skip re-evaluating stage-2 for a level unless the DAG actually changed (monotone insert counter on `PrismChain`, last-probed marker in `PrismLedger`) — tightens the union-bound constant, doesn't change the exponent; don't block on it.
+6. **Verify:** `cargo test --workspace` green; then re-run the B-10 3-node compose devnet once and confirm (a) levels still confirm (stage-1 path, unchanged latency), (b) zero `SortitionMismatch`/panics, (c) grep shows stage-2 evaluated without firing at shallow depth. The definitive stage-2-backstop live test (silence 8 chains, wait hours) is impractical here; the Monte Carlo + `stage2_latency_tests` (pinned to `Custom`) remain its guards.
 
 ### Backlog — as convenient, no correctness impact
 
