@@ -1,0 +1,47 @@
+[package]
+name = "argonaut-storage-provider"
+version = "0.1.0"
+edition = "2021"
+license = "Unlicense"
+description = "Provider daemon (Implementation D §D.9): serves blobs over iroh, answers storage challenges automatically."
+
+[[bin]]
+name = "argonaut-provider"
+path = "src/main.rs"
+
+[lib]
+name = "argonaut_storage_provider"
+path = "src/lib.rs"
+
+[dependencies]
+argonaut-chain-client = { path = "../chain-client" }
+argonaut-runtime = { path = "../../runtime" }
+argonaut-primitives-storage = { path = "../../primitives/storage" }
+argonaut-primitives-falcon = { path = "../../primitives/falcon" }
+argonaut-signer-core = { path = "../../wallet/signer-core" }
+pallet-storage-deals = { path = "../../pallets/storage-deals" }
+pallet-storage-proofs = { path = "../../pallets/storage-proofs" }
+pallet-provider-registry = { path = "../../pallets/provider-registry" }
+
+iroh = { workspace = true }
+iroh-blobs = { workspace = true }
+bao-tree = { workspace = true }
+
+sp-core = { workspace = true, features = ["std"] }
+parity-scale-codec = { workspace = true, features = ["std"] }
+blake3 = { workspace = true, features = ["std"] }
+
+tokio = { workspace = true }
+async-trait = "0.1"
+clap = { version = "4", features = ["derive"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = "1"
+thiserror = { workspace = true }
+log = "0.4"
+env_logger = "0.11"
+rand_core = "0.6"
+hex = "0.4"
+
+[dev-dependencies]
+tempfile = "3"

@@ -37,6 +37,14 @@ use sp_version::RuntimeVersion;
 pub use frame_system::Call as SystemCall;
 pub use pallet_balances::Call as BalancesCall;
 pub use pallet_timestamp::Call as TimestampCall;
+// D3: the provider daemon (client/storage-provider) builds these calls
+// out-of-process, the same way node/examples/submit_transfer_registry.rs
+// builds `BalancesCall` -- needs the concrete `Call` type re-exported, not
+// just the pallet's `Config` impl.
+pub use pallet_provider_registry::Call as ProviderRegistryCall;
+pub use pallet_storage_deals::Call as StorageDealsCall;
+pub use pallet_storage_proofs::Call as StorageProofsCall;
+pub use pallet_payment_channels::Call as PaymentChannelsCall;
 #[cfg(any(feature = "std", test))]
 pub use sp_runtime::BuildStorage;
 pub use sp_runtime::{Perbill, Permill};

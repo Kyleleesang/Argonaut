@@ -9,17 +9,18 @@ proceeds; it is the running counterpart to the spec.
 
 ## Milestone status
 
-**Current checkpoint (2026-07-16):** **D2 FULLY DONE, including the live devnet
-check.** All four pallets implemented + wired into the runtime (D.4–D.8), 49
-pallet unit tests green, runtime wasm build green, node binary green. The
-previously-owed C-D2.1/C-D2.2 live-verification is now done (see below) —
-D2 has nothing left.
+**Current checkpoint (2026-07-17):** **D1 and D2 fully done. D3 code-done and
+live-verified for the chain-interaction half** (registration + storage reads
+end to end against a real devnet); the challenge-response loop is
+implemented and unit-tested against the real host function but not yet
+soaked live across real epoch boundaries, and real iroh network
+serving/fetch is a deliberate, documented scope cut to D4.
 
 | Milestone | State | Notes |
 |---|---|---|
 | **D1** — `primitives/storage` + `argonaut-store encode` + host-fn reg | ✅ **DONE — 14/14 tests + node compiles** | committed |
 | **D2** — pallets (registry/deals/proofs/channels) + runtime wiring | ✅ **DONE — 49 pallet tests + runtime tests + wasm + node binary all green + live devnet check green** | committed |
-| D3 — chain-client + provider daemon | not started | P-D3 (needs iroh) |
+| **D3** — chain-client + provider daemon | 🟢 **CODE-DONE, partially live-verified** (see below) | committed |
 | D4/D5 — retrieval + repair | not started | P-D4 |
 
 ### C-D2.1/C-D2.2 live devnet verification — DONE 2026-07-16
@@ -47,6 +48,85 @@ regardless of either value).
   documented formula.
 
 C-D2.1 and C-D2.2 are closed. Nothing else in D2 is owed.
+
+### D3 detail (2026-07-17)
+
+**Two new crates**, both compiling clean and green on `cargo test --workspace`
+(50/50 suites):
+
+- **`client/chain-client`** (`argonaut-chain-client`, D.11) — thin native
+  RPC client depending on `argonaut-runtime` directly (no subxt). Three
+  modules: `keys` (manual storage-key computation via the real
+  `frame_support::StorageHasher` impls, not hand-rolled hashing — one test
+  cross-checks the computed `StorageProofs::Beacons` prefix against the
+  literal value a live devnet returned in the D2 verification run above),
+  `extrinsic` (builds + signs `General`-preamble extrinsics — bootstrap and
+  registry mode turned out to be exactly the same construction, differing
+  only in which `CheckFalconSignature` variant fills `extra`'s first slot,
+  once traced through `runtime/src/extensions.rs`'s `validate`), and
+  `subscribe` (`chain_subscribeFinalizedHeads`, implemented per spec but not
+  used by D3's own daemon — see below).
+- **`client/storage-provider`** (`argonaut-storage-provider`, D.9) — the
+  `argonaut-provider` daemon binary. `blobs.rs` (`DiskBlobStore`, bao proof
+  generation via the exact `PreOrderMemOutboard`/`encode_ranges_validated`
+  pattern already proven in `primitives/storage/src/tests.rs` — its own test
+  asserts a generated slice verifies against the *real* `bao_proof::verify_slice`
+  host function, not a re-implementation), `chain.rs` (typed wrapper: register,
+  accept/activate\_shard, submit\_proof, storage reads — using the pallets'
+  own `Encode`/`Decode` types via direct crate deps, not hand-mirrored
+  structs), `responder.rs` (epoch-driven challenge loop, polling
+  `finalized_head()` rather than the subscription stream -- see its module
+  doc for why), `main.rs` (CLI, keystore loading, startup registration).
+
+**Runtime change required and made:** `runtime/src/lib.rs` only re-exported
+`Call` types for `System`/`Balances`/`Timestamp` (needed by existing
+examples); added the same re-export for the four D pallets
+(`ProviderRegistryCall`/`StorageDealsCall`/`StorageProofsCall`/
+`PaymentChannelsCall`) since an out-of-process client needs the concrete
+`Call` type, not just the pallet's `Config` impl — matches the existing
+pattern exactly, not a new one.
+
+**Scope cut, explicit and spec-consistent:** `BlobStore::fetch` (pulling a
+blob from a peer over iroh) is stubbed. D3's own acceptance bar (D.12) is
+the challenge-response loop, not retrieval — that's D4's "100 MiB fetch...
+per-stride vouchers." Proof generation needs only the shard bytes +
+`bao-tree`, no iroh at all, so `DiskBlobStore` is fully real for everything
+D3 actually needs; iroh/iroh-blobs (`=1.0.2`/`=0.103.0`, D.2's pins) are
+confirmed to resolve and compile cleanly together (de-risked before writing
+any code against them), but real network serving is D4 work. **C-D1.2
+("`blake3::hash(shard) == iroh-blobs add_bytes root`") is therefore still
+open** — nothing yet exercises the real iroh-blobs store.
+
+**Live-verified (2026-07-17), the chain-interaction half:** ran the actual
+`argonaut-provider` binary against a real single-node devnet (temporary
+`build-spec`-generated chain spec funding a fresh Falcon keystore account
+and lowering `prismMVoterChains` for tractable confirmation time — same
+never-committed-artifact technique as the B-10/D2 verifications). Observed,
+by decoding the real `System::Events` for the block that included the
+daemon's extrinsic (via a throwaway decoder linking the actual
+`argonaut_runtime::RuntimeEvent` type, not manual SCALE-byte reading):
+`Balances::Reserved` (FalconRegistry key deposit) → `FalconRegistry::KeyRegistered`
+(A-4's auto-register-on-bootstrap firing correctly) → `Balances::Withdraw`
+(fee) → `Balances::Reserved` (the exact `1_000_000_000_000_000`-planck stake
+the daemon's default `--stake` requested) → **`ProviderRegistry::Registered`**
+→ fee-refund/payment events → `ExtrinsicSuccess`. Then independently
+recomputed `chain-client`'s own storage prefix for `ProviderRegistry::Providers`
+and confirmed a real entry exists at exactly that key. This proves the full
+path -- keystore load, bootstrap-mode Falcon signing, `General`-preamble
+extrinsic construction, WS submission, chain-side validation and dispatch,
+and manual storage-key reads -- works end to end against a real node, not
+just in unit tests.
+
+**Not yet live-verified:** the responder's actual challenge-response loop
+across real epoch boundaries (the registration test above didn't run long
+enough to reach one), and the full D.12 D3 acceptance scenario (3 provider
+daemons + 1 client, 50 compressed epochs, kill-one-daemon →
+`report_missed` → slash → `Degraded`) -- a substantially larger multi-daemon
+integration exercise than a single sitting's live-verification pass. The
+unit-level proof-generation correctness (bao slices the real host function
+accepts) and the chain-interaction correctness (this section) are both
+solid; the remaining gap is specifically the multi-daemon, multi-epoch
+choreography.
 
 ### D2 detail (2026-07-09)
 - **Four pallets**, each `lib.rs + mock.rs + tests.rs + benchmarking.rs +
@@ -255,6 +335,16 @@ C-D2.1 and C-D2.2 are closed. Nothing else in D2 is owed.
   never mocked proofs (spec D.12).
 
 ## Carry-forward for D3 (chain-client + provider daemon)
+
+**Superseded by what D3 actually did (2026-07-17): the daemon reads the
+beacon directly from `StorageProofs::Beacons` on-chain rather than
+recomputing it from `block_hash(epoch_boundary − BeaconDelay)` itself.**
+Simpler and strictly safer than the plan below -- it's the same value the
+pallet already computed and stored, so there's no way for the daemon's copy
+of the formula to drift from the pallet's (e.g. if `BeaconDelay` or the
+saturating-subtraction edge case ever changed on one side and not the
+other). The original plan is kept below for context, not as the current
+approach.
 
 - **Beacon recompute must match the pallet exactly.** The daemon computes the
   beacon itself as `block_hash(epoch_boundary_block − BeaconDelay)` and feeds it
