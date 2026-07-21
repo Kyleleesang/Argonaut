@@ -43,3 +43,87 @@ canvas { display: block; touch-action: none; }
   position: absolute; right: 26px; bottom: 24px; font-size: 9px; letter-spacing: 0.18em;
   color: var(--muted); text-transform: uppercase; text-align: right; line-height: 2;
 }
+
+/* ── Holographic body readouts ─────────────────────────────────────────────
+   Projected panels beside each celestial body. Compact by default; the
+   focused body expands to its full summary. */
+.holo {
+  --holo: #8fb8ff;
+  position: relative;
+  transform: translate(14px, -50%);
+  user-select: none;
+  font-family: var(--mono);
+  filter: drop-shadow(0 0 14px color-mix(in srgb, var(--holo) 45%, transparent));
+}
+/* Leader line from the body out to the panel. */
+.holo-tether {
+  position: absolute; top: 50%; right: 100%; width: 26px; height: 1px;
+  background: linear-gradient(to left, var(--holo), transparent);
+  opacity: 0.75;
+}
+.holo-tether::before {
+  content: ""; position: absolute; right: -3px; top: -2.5px;
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--holo); box-shadow: 0 0 9px var(--holo);
+}
+.holo-panel {
+  position: relative; overflow: hidden;
+  min-width: 128px; max-width: 148px; padding: 8px 11px 9px;
+  background: linear-gradient(
+    150deg,
+    color-mix(in srgb, var(--holo) 15%, rgba(6, 11, 20, 0.62)),
+    rgba(6, 11, 20, 0.5)
+  );
+  backdrop-filter: blur(9px);
+  border: 1px solid color-mix(in srgb, var(--holo) 48%, transparent);
+  border-left: 2px solid var(--holo);
+  border-radius: 2px;
+  transition: min-width 0.35s ease, max-width 0.35s ease, border-color 0.35s ease;
+}
+/* Scanlines — the one detail that sells "projection" over "glass card". */
+.holo-panel::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--holo) 13%, transparent) 0 1px,
+    transparent 1px 3px
+  );
+  opacity: 0.5;
+}
+.holo-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.holo-dot {
+  width: 4px; height: 4px; border-radius: 50%; flex: none;
+  background: var(--holo); box-shadow: 0 0 7px var(--holo);
+}
+.holo-name {
+  font-size: 10.5px; letter-spacing: 0.2em; text-transform: uppercase;
+  font-weight: 700; color: var(--ink);
+}
+.holo-role {
+  font-size: 8px; letter-spacing: 0.16em; text-transform: uppercase;
+  color: var(--holo); opacity: 0.9;
+}
+/* Collapsed by default; the focused body's panel opens. */
+.holo-body {
+  display: grid; grid-template-rows: 0fr;
+  transition: grid-template-rows 0.4s ease, opacity 0.3s ease, margin-top 0.4s ease;
+  opacity: 0; margin-top: 0;
+}
+.holo-body > * { overflow: hidden; }
+.holo.on .holo-body { grid-template-rows: 1fr; opacity: 1; margin-top: 7px; }
+.holo.on .holo-panel {
+  min-width: 232px; max-width: 262px;
+  border-color: color-mix(in srgb, var(--holo) 78%, transparent);
+}
+.holo-cls {
+  margin: 0 0 5px; font-size: 8px; letter-spacing: 0.15em;
+  text-transform: uppercase; color: var(--muted);
+}
+.holo-sum { margin: 0; font-size: 10px; line-height: 1.62; color: var(--ink); opacity: 0.9; }
+.holo-facts { margin: 8px 0 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 4px; }
+.holo-facts li {
+  font-size: 8px; letter-spacing: 0.1em; text-transform: uppercase;
+  padding: 3px 6px; border-radius: 2px; color: var(--holo);
+  background: color-mix(in srgb, var(--holo) 15%, transparent);
+  border: 1px solid color-mix(in srgb, var(--holo) 28%, transparent);
+}

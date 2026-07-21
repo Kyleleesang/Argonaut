@@ -142,14 +142,17 @@ function StationModel({ station }) {
   );
 }
 
-export function SpaceStation({ station }) {
+// `anchorRef` (optional) is attached to the orbiting inner group, so callers
+// can track the station's live world position -- e.g. to pin a label to it --
+// without duplicating the orbital maths and drifting out of phase with it.
+export function SpaceStation({ station, anchorRef }) {
   const orbit = useRef();
   useFrame((_, dt) => {
     if (orbit.current) orbit.current.rotation.y += dt * ((Math.PI * 2) / (station.period ?? 40));
   });
   return (
     <group ref={orbit} rotation={[station.inclination ?? 0.3, 0, 0]}>
-      <group position={[station.distance ?? 3.6, 0, 0]}>
+      <group ref={anchorRef} position={[station.distance ?? 3.6, 0, 0]}>
         <Suspense fallback={null}>
           <StationModel station={station} />
         </Suspense>

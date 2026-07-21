@@ -20,8 +20,8 @@ class TexBoundary extends Component {
   render() { return this.state.failed ? this.props.fallback : this.props.children; }
 }
 
-export function Planet({ data }) {
-  if (data.emissive) return <StarBody data={data} />;
+export function Planet({ data, stationRef }) {
+  if (data.emissive) return <StarBody data={data} stationRef={stationRef} />;
   if (!data.textures) return <PlainPlanet data={data} />;
   const fallback = <PlainPlanet data={data} />;
   return (
@@ -34,7 +34,9 @@ export function Planet({ data }) {
 }
 
 function sunDirFor(position) {
-  // The star sits at the origin; light direction on this body points to origin.
+  // The star sits at the centre of this body's orbit group, so `position` (the
+  // body's LOCAL offset) gives a direction to the star that stays correct in
+  // the body's own frame as it orbits -- no per-frame update needed.
   const v = new THREE.Vector3(-position[0], -position[1], -position[2]);
   if (v.lengthSq() === 0) v.set(0, 0, 1);
   return v.normalize();
@@ -44,7 +46,7 @@ function PlainPlanet({ data }) {
   const ref = useRef();
   useFrame((_, dt) => { if (ref.current) ref.current.rotation.y += dt * 0.03; });
   return (
-    <group position={data.position}>
+    <group>
       <mesh ref={ref} castShadow receiveShadow>
         <sphereGeometry args={[data.radius, 96, 96]} />
         <meshStandardMaterial
@@ -81,7 +83,7 @@ function TexturedPlanet({ data }) {
   });
 
   return (
-    <group position={data.position}>
+    <group>
       <mesh ref={ref} castShadow receiveShadow>
         <sphereGeometry args={[data.radius, 160, 160]} />
         <meshStandardMaterial
@@ -155,10 +157,10 @@ function Moon({ moon }) {
   );
 }
 
-function StarBody({ data }) {
+function StarBody({ data, stationRef }) {
   // Neutron star / pulsar — full plasma-and-beams treatment, plus its own light.
   return (
-    <group position={data.position}>
+    <group>
       <NeutronStar
         radius={data.radius}
         spin={data.spin ?? 0.9}
@@ -170,7 +172,7 @@ function StarBody({ data }) {
         beams={data.beams ?? true}
       />
       <pointLight intensity={data.lightIntensity ?? 1.4} distance={0} decay={0} color={data.emissive ?? "#cfe0ff"} />
-      {data.station && <SpaceStation station={data.station} />}
+      {data.station && <SpaceStation station={data.station} anchorRef={stationRef} />}
     </group>
   );
 }

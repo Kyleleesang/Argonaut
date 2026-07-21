@@ -19,7 +19,19 @@ only record of what's deployed locally and where to re-download it.
 | `earth_normal.jpg` | 8192×4096 | Ecosystem `normalMap` | Solar System Scope | CC BY 4.0 |
 | `earth_night.jpg` | 8192×4096 | Ecosystem `emissiveMap` | NASA Black Marble / SSS | PD / CC BY 4.0 |
 | `earth_clouds.jpg` | 8192×4096 | Ecosystem `cloudsMap` | Solar System Scope | CC BY 4.0 |
-| `prism_albedo.jpg` | 8192×4096 | Prism `map`+`bumpMap`; Luna moon `map`+`bumpMap` | solarsystemscope.com/textures/download/8k_moon.jpg | CC BY 4.0 |
+| `prism_albedo.jpg` | 8192×4096 | Luna moon `map`+`bumpMap` | solarsystemscope.com/textures/download/8k_moon.jpg | CC BY 4.0 |
+| `prism_neptune_albedo.jpg` | 2048×1024 | Prism `map`+`bumpMap` | solarsystemscope.com/textures/download/2k_neptune.jpg (2K is the max res offered — real Neptune imagery is Voyager-2-era, no 8K source exists) | CC BY 4.0 |
+| `star_surface.jpg` | 4096×2048 | Core `uMap` in `BlueStar.jsx` | solarsystemscope.com/textures/download/8k_sun.jpg (served at 4K) | CC BY 4.0 |
+
+**Why the blue star wears a *solar* texture.** No photographic texture of a
+blue star's surface exists, and none can: no telescope resolves any star's disc
+except the Sun (plus a couple of red supergiants as a few pixels), so every
+"blue star texture" online is an artist's painting carrying no real structure.
+The Sun *is* a resolved star, so `BlueStar.jsx` samples this map for its
+**luminance only** — genuine granulation, plage and sunspot structure — and
+remaps that through a blue-hot palette. Real structure, correct colour
+temperature. Sampled via the sphere's own `uv` attribute, never an atan2
+unwrap (which seams at ±180°).
 | `aegis_albedo.jpg` | 4096×2048 | Aegis `map` | …/download/8k_saturn.jpg (served at 4K) | CC BY 4.0 |
 | `saturn_ring_alpha.png` | 8192×500 RGBA | Aegis `rings.texture` (alpha = gaps) | …/download/8k_saturn_ring_alpha.png | CC BY 4.0 |
 | `station_hull_diff.jpg` | 2048² | SpaceStation hull `map` | dl.polyhaven.org …/metal_plate/metal_plate_diff_2k.jpg | CC0 |

@@ -14,15 +14,64 @@ npm install
 npm run dev        # → http://localhost:5173
 ```
 
-**Status (2026-07-13): full texture set is wired and on disk** (gitignored —
+**Status (2026-07-21): full texture set is wired and on disk** (gitignored —
 see ASSETS.md §0 for the re-download inventory). Build + dev server verified.
-Current scene: Prism = 8K lunar surface tinted crystalline (bump relief);
-Aegis = real Saturn + textured ring band + 5,000-rock instanced asteroid
-field (Cassini-style gap); Ecosystem = 8K Earth (day/night/clouds/normal)
-with **Luna orbiting it**; Citadel = neutron star (plasma shader + rotating
-pulsar beams) with a **PBR space station in orbit** (spinning habitat ring,
-solar arrays, nav lights). Galactic ambient fill (ambient + hemisphere
-lights) keeps night sides readable.
+Current scene: **Core = a blue star** (`src/BlueStar.jsx`) — convective
+photosphere, Eddington limb darkening — which lights the system; Prism = real
+Neptune imagery; Ecosystem = 8K Earth (day/night/clouds/normal) with **Luna
+orbiting it**; Aegis = real Saturn + textured ring band + 5,000-rock instanced
+asteroid field (Cassini-style gap); Citadel = a magnetar
+(`src/NeutronStar.jsx`) with collimated particle jets, a dipole magnetic-field
+cage, a **volumetric accretion disk**, and a **PBR space station in orbit**
+(spinning habitat ring, solar arrays, nav lights). **The bodies orbit the star**
+— Citadel innermost, then Prism, Ecosystem and Aegis outward, with Keplerian
+periods so outer bodies move slower. Selecting a body — via its tab or by
+**clicking the body itself** — opens a **holographic readout**
+(`src/Hologram.jsx`) beside it; nothing is annotated until you pick something.
+Galactic ambient fill (ambient + hemisphere lights) keeps night sides readable.
+
+### Orbits are clearance-constrained — run the checker
+
+Bodies render far larger than their spheres: Aegis's rings reach 7.5 units,
+Citadel's station orbits at 6.8, the star's corona hull at 2.6 × radius. So
+neighbouring orbits clip when their phases line up unless separated by more
+than the **sum of both footprints**. This cannot be eyeballed — a set of radii
+that looked fine on screen had three genuinely overlapping pairs.
+
+```bash
+node tools/clearance.mjs     # samples every orbit, prints true closest approach
+```
+
+Run it after changing any orbital radius, ring extent, moon distance, station
+distance **or corona hull size** — the last one bit once, silently cutting the
+star-to-Citadel clearance from 3.2 to 0.5 when the corona grew.
+
+### Volumetric rendering (`Corona`, `AccretionDisk`)
+
+Both are **raymarched volumes, not textured shells**. This distinction is the
+whole ballgame: a shell has one fixed silhouette, no internal depth, and zero
+parallax when you orbit it, so it reads as a soap bubble no matter what you
+paint on it. Here the hull mesh only exists to generate fragments — the
+fragment shader analytically intersects the view ray (sphere for the corona,
+slab ∩ cylinder for the disk, so the thin disk isn't undersampled) and marches
+36–40 steps accumulating emission front-to-back. Both clip the march at the
+star's near surface so gas behind the opaque core can't bleed through it.
+
+Three constraints that are easy to break:
+
+- The hull **must be closed** (`openEnded: false`). An open cylinder generates
+  no fragments for rays arriving from above, so nothing marches and you get a
+  bare ring.
+- Use `side: BackSide` — exactly one fragment per ray, so the volume isn't
+  integrated twice and double-added.
+- Use `CustomBlending` with `One`/`One`, **not** `AdditiveBlending`. The latter
+  is `srcAlpha`/`One`, which re-multiplies by an alpha the front-to-back
+  accumulation has already applied.
+
+The disk implements real disk physics, not decoration: Keplerian shear
+(ω ∝ r^−3/2, sampled in a counter-rotated frame so spiral arms emerge rather
+than being drawn as stripes), a T ∝ r^−3/4 blackbody ramp, relativistic
+Doppler beaming `(1 + βμ)³`, and magnetospheric inner truncation.
 
 ## Go photoreal (in order of impact)
 
@@ -43,16 +92,15 @@ lights) keeps night sides readable.
   emissive slots + correct sRGB-vs-linear colour spaces per map.
 - **Atmospheric scattering** — a back-side fresnel shell brighter on the lit
   limb, with sunset colour near the terminator (`Atmosphere` in `Planet.jsx`).
-- **Postprocessing** — bloom (mipmap, thresholded so only genuinely bright
-  things glow), vignette, subtle film grain, SMAA anti-aliasing.
-- **Cinematic camera** — `CameraControls.setLookAt(..., true)` flies smoothly to
-  each body on tab click; drag to orbit, scroll to zoom.
+- **Volumetric coronae + accretion disk** — raymarched in the fragment shader
+  rather than faked with shells (see above).
+- **Cinematic camera that tracks** — `setLookAt(..., true)` flies smoothly to a
+  body, then hands off to per-frame `moveTo` so the camera stays glued to it as
+  it orbits (a one-shot `setLookAt` goes stale the moment the body moves on).
+  Drag to orbit, scroll to zoom, both still work while it travels.
 
 ## Roadmap (next, in rough priority)
 
-- **Orbital motion** — animate `config.js` positions on ellipses and have the
-  camera rig follow the focused body each frame. Fixed positions now keep the
-  fly-to transitions clean.
 - **Black-hole lensing background** — the raymarched lensing shader is ported in
   `src/BlackHole.jsx` (fullscreen pass), but it is **not wired in**: as a
   fullscreen depth-off pass it fought the EffectComposer's buffer clear and
@@ -76,10 +124,14 @@ src/
   NeutronStar.jsx  neutron star/pulsar: plasma shader, rotating beams, breathing corona
   SpaceStation.jsx procedural PBR station (hub, spinning habitat ring, solar arrays)
   NebulaSky.jsx    stable painterly nebula + starfield backdrop
+  BlueStar.jsx     the Core: real solar surface map recoloured blue + volumetric corona
   Planet.jsx       PBR body + atmosphere + textured rings + asteroid field + orbiting moons
+  Hologram.jsx     holographic readout pinned beside the selected body
   BlackHole.jsx    OPTIONAL lensing background (not wired in — see roadmap)
-  config.js        the system definition (positions, radii, texture slots, moons, station)
-  index.css        HUD styling
+  config.js        the system definition (orbits, radii, texture slots, moons, station, copy)
+  index.css        HUD + hologram styling
+tools/
+  clearance.mjs    orbit overlap checker (see above) — run after changing sizes
 public/
   textures/     ← planet/station maps (gitignored; inventory in ASSETS.md §0)
   hdr/          ← environment HDRI (gitignored; not wired, USE_HDRI=false)
