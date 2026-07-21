@@ -59,14 +59,41 @@ function OrbitGroup({ orbit, children }) {
   );
 }
 
+// Camera offset for a three-quarter SUNLIT view of a body.
+//
+// The star sits at the origin, so offsetting the camera radially outward -- the
+// obvious reading of "stand back from it" -- puts the camera squarely on the
+// body's night side and renders it as a black disc. Swinging the offset back
+// toward the star and round to one side gives a gibbous phase: mostly lit, but
+// with a terminator still in frame so the body reads as a sphere rather than a
+// flat lit circle (which is what a head-on "full" phase looks like).
+const _UP = new THREE.Vector3(0, 1, 0);
+const _rad = new THREE.Vector3();
+const _tan = new THREE.Vector3();
+const _off = new THREE.Vector3();
+function sunlitOffset(p, d) {
+  _rad.copy(p).normalize();
+  _tan.crossVectors(_UP, _rad);
+  if (_tan.lengthSq() < 1e-6) _tan.set(1, 0, 0); // body directly over a pole
+  _tan.normalize();
+  return _off
+    .copy(_rad).multiplyScalar(-0.62)  // back toward the star (~52 deg phase)
+    .addScaledVector(_tan, 0.72)       // ... swung round to one side
+    .addScaledVector(_UP, 0.31)        // ... and lifted a little
+    .normalize()
+    .multiplyScalar(d);
+}
+
 function Rig({ focus, controls, bodyRefs }) {
   const following = useRef(false);
   const v = useRef(new THREE.Vector3());
+  const lastAz = useRef(null);
 
   useEffect(() => {
     const c = controls.current;
     if (!c) return;
     following.current = false;
+    lastAz.current = null;
     if (focus < 0) {
       c.setLookAt(0, 24, 72, 0, 0, 0, true);
       return;
@@ -75,9 +102,8 @@ function Rig({ focus, controls, bodyRefs }) {
     if (!el) return;
     el.getWorldPosition(v.current); // bodies move, so read the LIVE position
     const { x, y, z } = v.current;
-    const len = Math.hypot(x, y, z) || 1;
-    const d = BODIES[focus].framing;
-    c.setLookAt(x + (x / len) * d, y + d * 0.35 + 1.2, z + (z / len) * d, x, y, z, true);
+    const o = sunlitOffset(v.current, BODIES[focus].framing);
+    c.setLookAt(x + o.x, y + o.y, z + o.z, x, y, z, true);
     // Hand over to per-frame following once the cinematic fly-to has landed;
     // following during the transition would cancel it.
     const id = setTimeout(() => { following.current = true; }, 1300);
@@ -93,6 +119,23 @@ function Rig({ focus, controls, bodyRefs }) {
     const el = bodyRefs.current[focus];
     if (!el) return;
     el.getWorldPosition(v.current);
+    // Co-orbit. `moveTo` only translates, so as the body sweeps around the star
+    // its sun direction rotates out from under a fixed camera offset and the
+    // sunlit framing decays back to the night side within tens of seconds.
+    // Rotating the camera about the body by the same azimuth the body travelled
+    // holds the phase angle. Applied as a delta, so the user's own dragging is
+    // preserved rather than overwritten.
+    const az = Math.atan2(v.current.z, v.current.x);
+    if (lastAz.current !== null) {
+      let dAz = az - lastAz.current;
+      if (dAz > Math.PI) dAz -= Math.PI * 2;
+      if (dAz < -Math.PI) dAz += Math.PI * 2;
+      // Sign is empirical: camera-controls' azimuth runs opposite to
+      // atan2(z, x) here, and getting it backwards DOUBLES the drift
+      // instead of cancelling it (verified on screen, not by reasoning).
+      if (Math.abs(dAz) > 1e-7) c.rotate(-dAz, 0, false);
+    }
+    lastAz.current = az;
     c.moveTo(v.current.x, v.current.y, v.current.z, false);
   });
   return null;
