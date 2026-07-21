@@ -132,13 +132,19 @@ const coronaFrag = /* glsl */ `
     float t0 = max(-b - hOut, 0.0);
     float t1 = -b + hOut;
 
-    // Ray vs. the opaque core -> stop at the star's near surface, so we never
-    // integrate gas that is physically hidden behind it.
+    // Soft star occlusion. A hard clip (t1 = min(t1, tc)) removes ALL glow
+    // behind the star along each ray; because the cut is binary at the star's
+    // silhouette it carves a hard-edged dark "shadow ball" out of the
+    // surrounding glow when viewed off-axis (the displaced-shadow artifact).
+    // Instead, keep the full march and fade each sample that lies behind the
+    // star's near surface, softly by how squarely the ray meets the star -- so
+    // gas directly behind the star is still hidden, but the edge is a gradient
+    // rather than a disc. tcNear = near hit; block = 1 through the star centre,
+    // easing to 0 at the limb.
     float hCore = b*b - (dot(oc,oc) - uCoreR*uCoreR);
-    if (hCore > 0.0) {
-      float tc = -b - sqrt(hCore);
-      if (tc > 0.0) t1 = min(t1, tc);
-    }
+    float tcNear = (hCore > 0.0) ? (-b - sqrt(hCore)) : 1e9;
+    float impact = sqrt(max(dot(oc,oc) - b*b, 0.0));
+    float block = 1.0 - smoothstep(uCoreR * 0.5, uCoreR * 1.05, impact);
     if (t1 <= t0) discard;
 
     const int STEPS = 40;
@@ -187,6 +193,8 @@ const coronaFrag = /* glsl */ `
 
         // uWisp 1 = fully structured; 0 = a smooth featureless halo.
         float d = mix(1.0, shaped, uWisp) * radial;
+        // Soft occlusion: fade samples sitting behind the star's near surface.
+        d *= (t > tcNear) ? (1.0 - block) : 1.0;
         if (d > 0.001) {
           vec3 col = mix(uHot, uCool, clamp(r * 1.25, 0.0, 1.0));
           float a = clamp(d * uDensity * dt, 0.0, 1.0);
@@ -565,13 +573,14 @@ const diskFrag = /* glsl */ `
     float t0 = max(max(ty0, tc0), 0.0);
     float t1 = min(ty1, tc1);
 
-    // Never integrate gas hidden behind the opaque star.
+    // Soft star occlusion (see the corona for the full rationale): fade disk
+    // emission behind the star's near surface with a limb-softened edge, rather
+    // than hard-clipping the march, which carved a displaced dark ball.
     float b = dot(oc, rd);
     float hCore = b * b - (dot(oc, oc) - uCoreR * uCoreR);
-    if (hCore > 0.0) {
-      float tc = -b - sqrt(hCore);
-      if (tc > 0.0) t1 = min(t1, tc);
-    }
+    float tcNear = (hCore > 0.0) ? (-b - sqrt(hCore)) : 1e9;
+    float impact = sqrt(max(dot(oc, oc) - b * b, 0.0));
+    float block = 1.0 - smoothstep(uCoreR * 0.5, uCoreR * 1.05, impact);
     if (t1 <= t0) discard;
 
     const int STEPS = 36;
@@ -602,6 +611,8 @@ const diskFrag = /* glsl */ `
           // Fade in at the truncation edge, out at the rim.
           float edge = smoothstep(0.0, 0.10, rn) * smoothstep(1.0, 0.62, rn);
           float d = smoothstep(0.34, 0.66, turb) * vert * edge;
+          // Soft occlusion: fade samples behind the star's near surface.
+          d *= (t > tcNear) ? (1.0 - block) : 1.0;
           if (d > 0.001) {
             // T ~ r^-3/4 -> blue-white in, amber, then dull red out.
             float temp = pow(uInner / rc, 0.75);
