@@ -99,6 +99,17 @@ Doppler beaming `(1 + βμ)³`, and magnetospheric inner truncation.
   it orbits (a one-shot `setLookAt` goes stale the moment the body moves on).
   Drag to orbit, scroll to zoom, both still work while it travels.
 
+## Performance & textures
+
+- **`PERFORMANCE.md`** — why flying in close to Citadel drops frame rate (the
+  corona + disk are per-pixel raymarched, so cost scales with screen area), what
+  already mitigates it (`framing: 18`), and the fix options in priority order
+  (fewer steps/octaves → analytic early-out → 3D noise texture → half-res
+  offscreen). Also: why downscaling textures does **not** fix it.
+- **`TEXTURES.md`** — the 8K originals vs the 3.5 MB 2K web set, how to swap
+  which is live, and what must happen before a public deploy (commit the maps,
+  add `CREDITS.md` for the CC BY assets, set the Vite `base`).
+
 ## Roadmap (next, in rough priority)
 
 - **Black-hole lensing background** — the raymarched lensing shader is ported in
@@ -121,7 +132,7 @@ Doppler beaming `(1 + βμ)³`, and magnetospheric inner truncation.
 src/
   main.jsx         entry
   App.jsx          Canvas · lighting (star + galactic ambient/hemisphere) · camera fly-to · HUD
-  NeutronStar.jsx  neutron star/pulsar: plasma shader, rotating beams, breathing corona
+  NeutronStar.jsx  magnetar (Citadel): plasma shader, jets, field cage, volumetric corona + accretion disk
   SpaceStation.jsx procedural PBR station (hub, spinning habitat ring, solar arrays)
   NebulaSky.jsx    stable painterly nebula + starfield backdrop
   BlueStar.jsx     the Core: real solar surface map recoloured blue + volumetric corona
@@ -133,6 +144,10 @@ src/
 tools/
   clearance.mjs    orbit overlap checker (see above) — run after changing sizes
 public/
-  textures/     ← planet/station maps (gitignored; inventory in ASSETS.md §0)
+  textures/     ← live map set (gitignored; 8K/2K variants + swap in TEXTURES.md)
   hdr/          ← environment HDRI (gitignored; not wired, USE_HDRI=false)
 ```
+
+Docs: `ASSETS.md` (texture sourcing), `TEXTURES.md` (8K/2K variants),
+`PERFORMANCE.md` (raymarch cost + fixes), `../docs/FRONTEND_SOLARSYSTEM_SPEC.md`
+(the design this implements).

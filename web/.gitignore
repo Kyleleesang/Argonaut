@@ -10,3 +10,8 @@ public/textures/*
 public/hdr/*
 !public/textures/.gitkeep
 !public/hdr/.gitkeep
+
+# Local-only texture variants: the 8K originals and the downscaled web set.
+# Kept side by side so they can be A/B'd without re-downloading or re-encoding.
+public/textures-8k/
+public/textures-2k/
