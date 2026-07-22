@@ -10,6 +10,7 @@
 //! subscription in [`subscribe`]. This module is just the connection +
 //! request glue.
 
+pub mod channels;
 pub mod extrinsic;
 pub mod keys;
 pub mod subscribe;
@@ -53,7 +54,12 @@ fn encode_hex(bytes: &[u8]) -> String {
     format!("0x{}", hex::encode(bytes))
 }
 
-/// A persistent connection to one Argonaut node.
+/// A persistent connection to one Argonaut node. Not `Clone` (jsonrpsee's
+/// `Client` manages a drop-triggered background-task shutdown channel that
+/// doesn't support cheap duplication) -- a consumer that needs the chain
+/// from two places concurrently (e.g. the D4 daemon's `Responder` loop and
+/// its iroh protocol handlers) should open a second `connect()`, not try to
+/// share one.
 pub struct ChainClient {
     ws: WsClient,
 }

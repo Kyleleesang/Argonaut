@@ -52,11 +52,28 @@ pub fn sign_payload(
     payload: &[u8],
     rng: &mut (impl RngCore + CryptoRng),
 ) -> Result<Vec<u8>, String> {
-    let msg_hash = *blake3::hash(payload).as_bytes();
+    sign_digest(signing_key, blake3::hash(payload).as_bytes(), rng)
+}
+
+/// Raw Falcon-512 signature over an already-hashed 32-byte digest, with no
+/// further hashing. Needed wherever the on-chain check verifies a signature
+/// against a digest that was computed by something other than "hash exactly
+/// what `sign_payload` would hash" -- e.g. `pallet_payment_channels::settle`
+/// verifies against `voucher_signing_payload(&voucher)`, which is itself
+/// already `blake3(DS_VOUCHER ++ scale(voucher))`; calling `sign_payload` on
+/// top of that would hash it a second time and produce a signature the
+/// chain rejects. `sign_payload` is defined in terms of this function, not
+/// the other way around, so there is exactly one place the Falcon `sign`
+/// call itself happens.
+pub fn sign_digest(
+    signing_key: &[u8],
+    msg_hash: &[u8; 32],
+    rng: &mut (impl RngCore + CryptoRng),
+) -> Result<Vec<u8>, String> {
     let mut sk = SigningKeyStandard::decode(signing_key)
         .ok_or_else(|| "keystore signing key is corrupt or wrong length".to_string())?;
     let mut sig = vec![0u8; signature_size(sk.get_logn())];
-    sk.sign(rng, &DOMAIN_NONE, &HASH_ID_RAW, &msg_hash, &mut sig);
+    sk.sign(rng, &DOMAIN_NONE, &HASH_ID_RAW, msg_hash, &mut sig);
     Ok(sig)
 }
 

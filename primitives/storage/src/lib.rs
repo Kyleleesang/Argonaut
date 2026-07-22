@@ -144,6 +144,81 @@ pub fn voucher_signing_payload(v: &Voucher) -> [u8; 32] {
     *h.finalize().as_bytes()
 }
 
+// ── D4 retrieval + shard delivery wire protocols (off-chain, over iroh) ─────
+//
+// SCALE-encoded messages for two custom iroh protocols the D3/D4 daemon and
+// client speak directly (not the stock iroh-blobs blob-transfer protocol,
+// which has no concept of per-stride payment gating): shard delivery
+// (client -> provider, after `accept_shard`) and gated retrieval (client <->
+// provider, metered by payment-channel vouchers, spec §D.9 gate.rs /
+// architecture guide §9.6). Both message sets live here rather than in the
+// daemon or client crate because both sides need identical wire types.
+
+/// Billing quantum for retrieval (spec §D.9 gate.rs): a client may fetch at
+/// most this many bytes before the provider requires a fresh voucher
+/// covering everything served so far. 1 MiB, per the spec's own choice.
+pub const VOUCHER_STRIDE: u64 = 1024 * 1024;
+
+/// ALPN identifiers for the two custom iroh protocols (client and daemon
+/// both need the same bytes; kept here rather than in either crate so
+/// neither has to depend on the other for just a byte-string constant).
+pub const SHARD_PUSH_ALPN: &[u8] = b"argonaut/shard-push/1";
+pub const RETRIEVAL_ALPN: &[u8] = b"argonaut/retrieval/1";
+
+/// Client -> provider, once at the start of a shard-push session
+/// (`/argonaut/shard-push/1`): "here are the bytes for shard `shard_idx` of
+/// `deal_id`". The provider must independently verify
+/// `blake3::hash(&bytes) == ` the on-chain `ShardSpec.root` before trusting
+/// or storing them -- this message makes no claim about correctness itself.
+#[derive(Encode, Decode, TypeInfo, Clone, Debug)]
+pub struct ShardPushRequest {
+    pub deal_id: DealId,
+    pub shard_idx: ShardIndex,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Encode, Decode, TypeInfo, Clone, PartialEq, Eq, Debug)]
+pub enum ShardPushResponse {
+    Ok,
+    /// `blake3(bytes)` didn't match the on-chain `ShardSpec.root`.
+    RootMismatch,
+    /// No `Accepted`-state assignment for `(deal_id, shard_idx)` naming this
+    /// provider -- pushing shard bytes nobody asked this provider to hold.
+    NotAssigned,
+    Error,
+}
+
+/// Client -> provider, one per stride, on a long-lived bidirectional stream
+/// (`/argonaut/retrieval/1`, spec §D.9). `voucher`/`sig` must cover every
+/// byte served so far on this stream, not just this stride -- vouchers are
+/// cumulative by design (D.7), so the provider's check is simply
+/// `voucher.cumulative >= price_per_stride * (strides_served_so_far + 1)`.
+#[derive(Encode, Decode, TypeInfo, Clone, Debug)]
+pub struct RetrievalRequest {
+    pub channel_id: ChannelId,
+    pub root: BlobRoot,
+    pub offset: u64,
+    /// Requested length; provider caps it at `VOUCHER_STRIDE` regardless of
+    /// what's asked, so a client can't get more than one stride's worth of
+    /// unpaid-for bytes ahead by requesting a huge range.
+    pub length: u32,
+    pub voucher: Voucher,
+    pub sig: argonaut_primitives_falcon::FalconSignature,
+}
+
+#[derive(Encode, Decode, TypeInfo, Clone, Debug)]
+pub enum RetrievalResponse {
+    /// The requested byte range, exactly `length` bytes (or fewer at EOF).
+    Data(Vec<u8>),
+    /// Voucher doesn't cover this stride, or its signature/channel didn't
+    /// check out -- the client must send a better voucher and retry, not
+    /// treat this as fatal (mirrors "serve-then-verify at stride
+    /// granularity" from the catalog spec's P-2, applied here first).
+    PaymentRequired,
+    NoSuchBlob,
+    BadRange,
+}
+
 // ── Cross-pallet interface traits (D.4 / D.6) ───────────────────────────────
 //
 // These live here — the neutral shared crate — rather than in any one pallet, so

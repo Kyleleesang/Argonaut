@@ -12,7 +12,9 @@ path = "src/lib.rs"
 [dependencies]
 argonaut-runtime = { path = "../../runtime" }
 argonaut-primitives-falcon = { path = "../../primitives/falcon" }
+argonaut-primitives-storage = { path = "../../primitives/storage" }
 argonaut-signer-core = { path = "../../wallet/signer-core" }
+pallet-payment-channels = { path = "../../pallets/payment-channels" }
 
 sp-core = { workspace = true, features = ["std"] }
 sp-core-hashing = { git = "https://github.com/paritytech/polkadot-sdk", branch = "stable2412" }

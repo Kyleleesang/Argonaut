@@ -14,6 +14,10 @@
 use argonaut_primitives_storage::{BlobRoot, Manifest, CHUNK_SIZE, MANIFEST_VERSION};
 use parity_scale_codec::Encode;
 
+pub mod deal;
+pub mod fetch;
+pub mod net;
+
 /// BLAKE3 root of a byte slice == bao-tree root == iroh-blobs content id.
 pub fn blob_root(bytes: &[u8]) -> BlobRoot {
     *blake3::hash(bytes).as_bytes()

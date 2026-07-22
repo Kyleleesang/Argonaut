@@ -20,6 +20,7 @@ use sp_runtime::generic::Era;
 /// Which `CheckFalconSignature` variant signs this extrinsic. Both are
 /// `General`-preamble and share the exact same tail-extension construction;
 /// see the module doc.
+#[derive(Clone)]
 pub enum SignMode {
     /// First transaction for a not-yet-registered key: carries the public key
     /// inline, doubles as registration if the chain has

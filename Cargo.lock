@@ -211,6 +211,7 @@ name = "argonaut-chain-client"
 version = "0.1.0"
 dependencies = [
  "argonaut-primitives-falcon",
+ "argonaut-primitives-storage",
  "argonaut-runtime",
  "argonaut-signer-core",
  "frame-support",
@@ -218,6 +219,7 @@ dependencies = [
  "futures",
  "hex",
  "jsonrpsee 0.24.11",
+ "pallet-payment-channels",
  "pallet-transaction-payment",
  "parity-scale-codec",
  "rand_chacha 0.3.1",
@@ -334,6 +336,7 @@ dependencies = [
 name = "argonaut-primitives-storage"
 version = "0.1.0"
 dependencies = [
+ "argonaut-primitives-falcon",
  "bao-tree",
  "blake3",
  "parity-scale-codec",
@@ -524,11 +527,25 @@ name = "argonaut-store"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "argonaut-chain-client",
+ "argonaut-primitives-falcon",
  "argonaut-primitives-storage",
+ "argonaut-runtime",
+ "argonaut-signer-core",
  "blake3",
  "clap",
+ "env_logger 0.11.11",
+ "hex",
+ "iroh",
+ "log",
+ "pallet-provider-registry",
+ "pallet-storage-deals",
  "parity-scale-codec",
+ "rand_core 0.6.4",
  "reed-solomon-simd",
+ "serde_json",
+ "sp-core",
+ "tokio",
 ]
 
 [[package]]

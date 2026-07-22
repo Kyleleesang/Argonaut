@@ -9,19 +9,22 @@ proceeds; it is the running counterpart to the spec.
 
 ## Milestone status
 
-**Current checkpoint (2026-07-17):** **D1 and D2 fully done. D3 code-done and
-live-verified for the chain-interaction half** (registration + storage reads
-end to end against a real devnet); the challenge-response loop is
-implemented and unit-tested against the real host function but not yet
-soaked live across real epoch boundaries, and real iroh network
-serving/fetch is a deliberate, documented scope cut to D4.
+**Current checkpoint (2026-07-22):** **D1, D2, D3 fully done. D4 code-done,
+compiles clean, unit-tested, and *partially* live-verified** — deal creation,
+on-chain shard acceptance, and the real iroh shard-push protocol (bytes
+actually landing in a provider's blob store, `blake3`-verified against the
+on-chain root) are all confirmed working against a live multi-process devnet.
+Full end-to-end activation + `fetch` + byte-identity was not reached this
+session; see D4 detail below for exactly what's proven, what blocked the
+rest, and why neither blocker is a code defect. D5 (repair) not started.
 
 | Milestone | State | Notes |
 |---|---|---|
 | **D1** — `primitives/storage` + `argonaut-store encode` + host-fn reg | ✅ **DONE — 14/14 tests + node compiles** | committed |
 | **D2** — pallets (registry/deals/proofs/channels) + runtime wiring | ✅ **DONE — 49 pallet tests + runtime tests + wasm + node binary all green + live devnet check green** | committed |
-| **D3** — chain-client + provider daemon | 🟢 **CODE-DONE, partially live-verified** (see below) | committed |
-| D4/D5 — retrieval + repair | not started | P-D4 |
+| **D3** — chain-client + provider daemon | ✅ **DONE — live-verified end to end** (real devnet registration, decoded real on-chain events) | committed |
+| **D4** — real iroh retrieval (shard-push + gated retrieval protocols, `deal create`/`fetch` CLI) | 🟡 **CODE-DONE, unit-tested, partially live-verified** (deal creation + shard acceptance + real iroh push confirmed; activation + fetch not reached, see below) | committed |
+| D5 — repair | not started | needs D4's `fetch` (done) as a building block |
 
 ### C-D2.1/C-D2.2 live devnet verification — DONE 2026-07-16
 
@@ -48,6 +51,167 @@ regardless of either value).
   documented formula.
 
 C-D2.1 and C-D2.2 are closed. Nothing else in D2 is owed.
+
+### D4 detail (2026-07-21)
+
+**Real iroh network serving**, not stubbed: the two custom protocols D.9's
+`gate.rs` spec calls for, built directly on iroh's raw bidirectional QUIC
+streams (`ProtocolHandler`/`Router`, not the stock `iroh-blobs` blob-transfer
+protocol, which has no concept of per-stride payment gating). API knowledge
+came from reading the actual pinned crate sources and their own examples
+(`~/.cargo/registry/.../iroh-blobs-0.103.0/examples/{transfer,custom-protocol}.rs`)
+directly, not guessed — this de-risked what was expected to be the highest-risk
+part of D4, and the resulting code compiled clean on essentially the first
+real attempt (a handful of `Debug`-bound and `anyhow::Error`-vs-`std::error::Error`
+fixups, nothing structural).
+
+- **`primitives/storage`**: new wire-protocol types shared by both sides —
+  `ShardPushRequest`/`Response`, `RetrievalRequest`/`Response`, `Voucher`
+  (already existed), `VOUCHER_STRIDE` (1 MiB), `SHARD_PUSH_ALPN`/
+  `RETRIEVAL_ALPN` constants. Added `argonaut-primitives-falcon` as a
+  (no_std-safe) dependency since `RetrievalRequest` carries a
+  `FalconSignature`.
+- **`wallet/signer-core`**: new `sign_digest` (raw Falcon sign over an
+  already-hashed 32-byte digest, no internal re-hash) — needed because
+  `pallet_payment_channels::settle` verifies against
+  `voucher_signing_payload(&voucher)`, which is *itself* already a blake3
+  hash; the existing `sign_payload` would have hashed it a second time and
+  produced a signature the chain rejects. `sign_payload` is now defined in
+  terms of `sign_digest`, not duplicated.
+- **`client/chain-client`**: new `channels` module (`open_channel`,
+  `settle_channel`, `sign_voucher`) — lives here, not in the daemon's own
+  `chain.rs`, because both the provider daemon (settles) and the client CLI
+  (opens + signs per stride) need it.
+- **`client/storage-provider`**:
+  - `blobs.rs` gained `add_bytes` (ingest pushed bytes) and `read_range`
+    (serve raw byte ranges for retrieval — deliberately not per-stride
+    bao-verified slices; see `protocol.rs`'s module doc for why that's an
+    honest scope cut, not a silent gap).
+  - New `protocol.rs`: `ShardPushHandler` (verifies `blake3(bytes)` against
+    the on-chain root before storing, via a small `ShardAuthority` trait so
+    this module doesn't need to depend on chain-client's concrete types)
+    and `RetrievalHandler` (tracks bytes served per channel in memory,
+    requires each stride's voucher to cover everything served on that
+    channel so far).
+  - `main.rs`: binds a real iroh `Endpoint` (no relay, no DNS discovery —
+    `presets::Minimal` + `RelayMode::Disabled`; a devnet's participants
+    address each other directly via on-chain `relay_hint`, which now
+    carries a real `"ip:port"` instead of the D3 placeholder), persists the
+    daemon's iroh identity to `<data_dir>/iroh_secret.key` (stable across
+    restarts, same reasoning as the node's own libp2p key), and spawns a
+    `Router` serving both protocols. Gained a new one-shot `accept-shard`
+    subcommand (`argonaut-provider accept-shard --deal-id --shard-idx`) —
+    D3's daemon deliberately doesn't auto-bid on deals (module doc,
+    unchanged), so *something* has to submit `accept_shard` before the
+    shard-push protocol's `ShardAuthority` check will accept a push; this is
+    that something, until a real bidding policy exists.
+- **`client/argonaut-store`**: new `deal` module — `create_deal` (submit +
+  poll until mined) and `push_shards_for_deal` (poll each shard's
+  `ShardAssignments` entry until `Accepted`, then push to whichever provider
+  actually holds it) — see "Bugs found & fixed (D4)" below for why this is
+  two functions, not one, as of 2026-07-22 — and `fetch` module (`fetch_shard`
+  — opens a payment channel sized to the shard, retrieves stride by stride
+  with an ever-larger voucher, verifies the reassembled shard's root). New
+  CLI subcommands `deal-create` and `fetch` wired into `main.rs`.
+  `discover_active_providers` (`state_getKeysPaged` over `Active` providers,
+  no ranking beyond "first n") is now only an upfront informational check,
+  not the push target — see below for why.
+
+**Known gap, documented in `protocol.rs`'s own module doc, not silent:
+`RetrievalHandler` never verifies `RetrievalRequest::sig`.** It checks that
+the claimed `voucher.cumulative` covers strides served so far (the metering
+logic works), but never confirms the signature is real or belongs to the
+channel's actual `from` account — so as implemented, anyone who knows a
+`channel_id` and sends a garbage signature with a big enough `cumulative`
+gets served for free. The metering mechanism is real; the authentication of
+*who* is paying is not, yet. Fix needs the provider to resolve the channel's
+`from` account + Falcon key on-chain (mirroring `settle`'s own inline-pk /
+registry-lookup resolution) before calling `falcon_crypto::verify` — a
+second small chain-backed authority trait, parallel to `ShardAuthority`,
+not done in this pass. **Do not treat this protocol as production-safe
+until this is closed.**
+
+**Other documented scope cuts, matching this session's established
+pattern of stating them rather than hiding them:**
+- Manifest distribution isn't automated — `fetch` requires the caller to
+  already have the local `manifest.scale`, rather than fetching it from a
+  provider first (the spec's own "obtain manifest from any provider" step).
+- `price_per_stride` is an out-of-band-agreed rate passed identically to
+  both the daemon and the fetching client — nothing in D prices retrieval
+  bandwidth on-chain.
+- One payment channel per shard fetched, not one reused across a session's
+  shards.
+- Provider selection in `deal create` is "first n active", no ranking.
+
+**Live verification: partial, 2026-07-22.** Every unit-level claim above is
+tested against the real thing, not a mock (bao slices against the real host
+function, from earlier D3 work; voucher signatures against the real
+`falcon_crypto::verify`; the exact same live-devnet-derived storage prefix
+used in D3's chain-client tests). The full multi-process scenario (a devnet +
+2 provider daemons + the client CLI pushing a shard, accepting it, activating
+it, and fetching it back byte-identical) was run live, using the same
+temporarily-lowered-`EpochDuration`-and-`BeaconDelay` technique (never
+committed) as D2's and D3's verifications.
+
+**Confirmed working, live, against a real 2-provider devnet:**
+- Both providers' `register_provider` (bootstrap mode) mined and visible via
+  `ProviderRegistry::Providers` — same mechanism D3 already verified, redone
+  here as part of the full run.
+- `argonaut-store deal-create` → `create_deal` mined, `Deals` storage
+  readable back with the correct `client`/`params` (3 separate deals created
+  across the session's retries, all mined correctly).
+- `argonaut-provider accept-shard` → `accept_shard` mined and
+  `ShardAssignments` shows `state: Accepted` with the correct provider
+  (deal 1, shard 0, provider1).
+- **The real iroh shard-push protocol, end to end**: `push_shard_to_provider`
+  opened a live QUIC connection, sent the shard bytes, and
+  `provider1_data/shards/<blake3-root>` exists on disk with the *exact* root
+  computed at `encode` time — i.e. the client → provider byte transfer and
+  the provider's own `blake3(bytes) == expected_root` verification both ran
+  for real, not mocked. This was the highest-risk untested path in D4 and it
+  works.
+
+**Not reached this session: `activate_shard` and `fetch`.** Two independent,
+non-code causes, both worth recording so a future session doesn't have to
+re-derive them:
+
+1. **Assignment-window vs. this devnet's per-extrinsic inclusion latency.**
+   This single-node Prism PoW devnet mines blocks continuously but individual
+   extrinsics sometimes take anywhere from under a minute to 20+ minutes to
+   actually land in a block (observed directly: two `accept_shard` calls
+   submitted in the same instant, one mined within the window, the other
+   didn't land until ~20 minutes later). With the test-only
+   `EPOCH_DURATION_BLOCKS=4` and the pallet default
+   `ASSIGN_TIMEOUT_EPOCHS=4`, the assignment window is only 16 blocks —
+   narrow enough that a second, unluckily-delayed `accept_shard` call
+   reliably missed it (`Error::AssignWindowClosed`, confirmed by reading
+   `ShardAssignments` back as `None` after the extrinsic's nonce had already
+   been consumed on-chain). Reproduced twice (deal 1 and deal 3). **Not a
+   concern at production parameters**: the real default
+   `EPOCH_DURATION_BLOCKS=100` gives a 400-block window, comfortably wider
+   than any inclusion delay observed here. A future rerun of this exact test
+   should either accept slower iteration at production epoch length, or use
+   a still-short-but-less-extreme test value (e.g. 20–40 blocks/epoch) so
+   the window has slack for this devnet's latency variance.
+2. **Provider daemons don't auto-discover new assignments.** `responder.rs`'s
+   `held: Vec<HeldAssignment>` is populated once at daemon startup from
+   `--assignment deal_id:shard_idx` CLI flags (module doc in
+   `client/storage-provider/src/main.rs`, an intentional D3/D4 scope
+   boundary, not a gap found this session) — a daemon started *before* a
+   deal exists has no way to learn about it later without a restart. This
+   session's provider daemons were started before any deal existed, so even
+   the one successfully-accepted-and-pushed shard (deal 1, shard 0) was
+   never a candidate for `try_activate` — confirmed by its `ShardAssignments`
+   entry still reading `state: Accepted` (never `Activated`) after several
+   hours of the daemon running. A future live run needs to either restart
+   the provider daemon with `--assignment <deal_id>:<shard_idx>` right after
+   `accept-shard` mines, or (a real future improvement, not attempted here)
+   give the daemon a way to pick up newly-accepted assignments without a
+   restart.
+
+Net effect: `activate_shard` and `argonaut-store fetch` remain unverified
+against a live chain (they're exercised by unit/integration tests only).
+That's the concrete next step for closing out D4 live verification.
 
 ### D3 detail (2026-07-17)
 
@@ -198,6 +362,29 @@ choreography.
   so a provider keeps 10_000 free after staking; two lifecycle assertions wrongly
   expected the raw earned/bounty amount. Switched to before/after deltas. Pallet
   math was correct.
+
+## Bugs found & fixed (D4)
+
+- **B-D4.1** `create_deal_and_push_shards` pushed shard bytes immediately
+  after submitting `create_deal`, in the same call. This is wrong on two
+  counts, both found by actually running it against a live node rather than
+  trusting a code read: (1) `submit_extrinsic` (`author_submitExtrinsic`) is
+  fire-and-forget — it returns as soon as the pool accepts the extrinsic, not
+  once it's mined — so the push fired before the deal even existed on-chain;
+  (2) `accept_shard` is first-come-first-served among *any* active provider
+  (`pallets/storage-deals::accept_shard`), so the client has no on-chain say
+  in who ends up holding a given `shard_idx` — pushing to a client-side
+  `discover_active_providers` guess can target the wrong provider even once
+  timing is fixed. Every live push attempt failed with `NotAssigned`
+  (`protocol.rs`'s `ShardAuthority` check correctly requires an `Accepted`
+  assignment to already exist — this was the push protocol working as
+  designed against a client that was calling it too early). **Fixed** by
+  splitting into `create_deal` (submit, then poll `Deals` until mined) and
+  `push_shards_for_deal` (poll each shard's `ShardAssignments` entry until
+  `Accepted`, then read back the *real* assignee and push to them). Live
+  re-verified afterward: `deal-create` now correctly waits, and the push that
+  does fire lands real bytes in the real assignee's blob store (see D4 live
+  verification above).
 
 ## Decisions (D2 — recorded so they aren't silently reversed)
 

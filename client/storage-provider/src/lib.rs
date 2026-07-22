@@ -5,4 +5,5 @@
 
 pub mod blobs;
 pub mod chain;
+pub mod protocol;
 pub mod responder;

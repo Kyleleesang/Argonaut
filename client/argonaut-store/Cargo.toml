@@ -15,8 +15,24 @@ path = "src/main.rs"
 
 [dependencies]
 argonaut-primitives-storage = { path = "../../primitives/storage" }
+argonaut-primitives-falcon = { path = "../../primitives/falcon" }
+argonaut-runtime = { path = "../../runtime" }
+argonaut-chain-client = { path = "../chain-client" }
+argonaut-signer-core = { path = "../../wallet/signer-core" }
+pallet-provider-registry = { path = "../../pallets/provider-registry" }
+pallet-storage-deals = { path = "../../pallets/storage-deals" }
 reed-solomon-simd = { workspace = true }
 parity-scale-codec = { workspace = true, features = ["std"] }
 blake3 = { workspace = true, features = ["std"] }
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
+
+# D4: deal create / fetch (D.10) need chain RPC + iroh.
+iroh = { workspace = true }
+sp-core = { workspace = true, features = ["std"] }
+tokio = { workspace = true }
+rand_core = "0.6"
+hex = "0.4"
+serde_json = { workspace = true }
+log = "0.4"
+env_logger = "0.11"
