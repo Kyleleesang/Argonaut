@@ -156,7 +156,7 @@ pub async fn run_prism_bridge(
     confirmation_notify: Arc<tokio::sync::Notify>,
     prune_enabled: bool,
     k_prune: u64,
-    stage2_enabled: bool,
+    confirmation_params: ConfirmationParams,
 ) {
     // B-7: recover the ledger's cursor from the Substrate chain's own
     // best-block number, not a fresh `PrismLedger::new` -- see
@@ -164,10 +164,6 @@ pub async fn run_prism_bridge(
     // start replaying confirmed levels from 1 again.
     let best_number: u64 = client.info().best_number.into();
     let mut ledger = PrismLedger::recover(prism_db, best_number);
-    // B-12: `--prism-stage2` (off by default) -- see its doc comment in
-    // `node/src/cli.rs` for why an unproven confidence margin must not gate
-    // finality by default.
-    let confirmation_params = ConfirmationParams { stage2_enabled, ..ConfirmationParams::default() };
 
     loop {
         let woke_by_fallback_tick = tokio::select! {

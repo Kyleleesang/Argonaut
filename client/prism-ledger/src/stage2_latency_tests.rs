@@ -100,8 +100,17 @@ fn stage2_confirms_a_92_of_100_majority_far_sooner_than_stage1_ever_could() {
         chain.insert_block(voter_block(nonce, c, genesis_c, vec![p1_hash], 0));
     }
 
-    let stage2_params =
-        confirmation::ConfirmationParams { stage2_enabled: true, ..Default::default() };
+    // B-15: post-B-15, stage2_enabled is on by default, but the real
+    // (SingleCheck) margin is vacuous below ~400-deep votes at m=100 -- this
+    // measurement is specifically about the *rule's* latency within the
+    // ROUNDS=200 window, so pin the pre-B-15 placeholder explicitly (see
+    // this file's own module doc for why that's still the right tool for
+    // this measurement).
+    let stage2_params = confirmation::ConfirmationParams {
+        stage2_enabled: true,
+        margin: confirmation::MarginPolicy::Custom(confirmation::placeholder_delta_d),
+        ..Default::default()
+    };
 
     let mut stage1_confirmed_at: Option<u64> = None;
     let mut stage2_confirmed_at: Option<u64> = None;
@@ -173,8 +182,17 @@ fn stage2_confirms_before_stage1_when_stragglers_are_merely_slow() {
         chain.insert_block(voter_block(nonce, c, genesis_c, vec![p1_hash], 0));
     }
 
-    let stage2_params =
-        confirmation::ConfirmationParams { stage2_enabled: true, ..Default::default() };
+    // B-15: post-B-15, stage2_enabled is on by default, but the real
+    // (SingleCheck) margin is vacuous below ~400-deep votes at m=100 -- this
+    // measurement is specifically about the *rule's* latency within the
+    // ROUNDS=200 window, so pin the pre-B-15 placeholder explicitly (see
+    // this file's own module doc for why that's still the right tool for
+    // this measurement).
+    let stage2_params = confirmation::ConfirmationParams {
+        stage2_enabled: true,
+        margin: confirmation::MarginPolicy::Custom(confirmation::placeholder_delta_d),
+        ..Default::default()
+    };
     let mut stage1_confirmed_at: Option<u64> = None;
     let mut stage2_confirmed_at: Option<u64> = None;
     let mut stragglers_voted = false;

@@ -27,6 +27,17 @@ mod prism_property_keys {
     /// Stage-1's k-deep confirmation threshold
     /// (`argonaut_prism_ledger::K_DEEP_CONFIRMATION`'s runtime value).
     pub const K_DEEP_CONFIRMATION: &str = "prismKDeepConfirmation";
+    /// B-15: stage-2's assumed adversary fraction (paper's `β`), as an
+    /// integer percent (not a float -- see this module's own doc comment on
+    /// why every other property here is an integer, for JSON robustness).
+    /// Feeds `confirmation::MarginPolicy::SingleCheck`'s `beta`.
+    pub const BETA_PERCENT: &str = "prismBetaPercent";
+    /// B-15: stage-2's per-check target failure probability, as `10^-N` --
+    /// i.e. this stores `N`, not `ε` itself, for the same integer-JSON reason
+    /// as `BETA_PERCENT`. Feeds `confirmation::MarginPolicy::SingleCheck`'s
+    /// `eps_target`. See `confirmation.rs`'s module doc for the ε sizing
+    /// guidance (devnet: 6 :: mainnet-value: 9+).
+    pub const EPS_EXPONENT: &str = "prismEpsExponent";
 }
 
 /// Devnet defaults -- byte-for-byte what this codebase hardcoded before B-16
@@ -42,6 +53,12 @@ pub struct PrismChainSpecParams {
     pub difficulty_shift: u32,
     pub target_interval_ms: u64,
     pub k_deep_confirmation: u64,
+    /// B-15: `confirmation::MarginPolicy::SingleCheck`'s `beta`, as a percent
+    /// (25 == 0.25).
+    pub beta_percent: u64,
+    /// B-15: `confirmation::MarginPolicy::SingleCheck`'s `eps_target`, as
+    /// `10^-eps_exponent` (6 == `1e-6`).
+    pub eps_exponent: u64,
 }
 
 impl Default for PrismChainSpecParams {
@@ -50,16 +67,23 @@ impl Default for PrismChainSpecParams {
         // matching literals here (that would just be a second, silently
         // driftable copy of the same numbers): `m_voter_chains`/
         // `target_interval_ms` from `Params::testnet()`, `k_deep_confirmation`
-        // from `argonaut_prism_ledger::K_DEEP_CONFIRMATION`. Only
-        // `difficulty_shift` has no prior single source of truth (it replaces
-        // the old two-step `testnet()`'s `>>20` + service.rs's `>>4`), so it's
-        // the sum of those two as a plain literal.
+        // from `argonaut_prism_ledger::K_DEEP_CONFIRMATION`, `beta_percent`
+        // from `confirmation::ASSUMED_ADVERSARY_FRACTION` (B-15). Only
+        // `difficulty_shift`/`eps_exponent` have no prior single source of
+        // truth (`difficulty_shift` replaces the old two-step `testnet()`'s
+        // `>>20` + service.rs's `>>4`; `eps_exponent` is B-15's own new
+        // devnet-appropriate pick -- see `confirmation.rs`'s module doc for
+        // why `6` (`1e-6`/check) is fine for a devnet but not for real value),
+        // so those two are plain literals.
         let testnet = argonaut_primitives_prism::Params::testnet();
         PrismChainSpecParams {
             m_voter_chains: testnet.m_voter_chains,
             difficulty_shift: 24, // == 20 (old Params::testnet() shift) + 4 (old B-11 service.rs shift)
             target_interval_ms: testnet.target_interval_ms,
             k_deep_confirmation: argonaut_prism_ledger::K_DEEP_CONFIRMATION,
+            beta_percent: (argonaut_prism_ledger::confirmation::ASSUMED_ADVERSARY_FRACTION * 100.0)
+                as u64,
+            eps_exponent: 6, // 1e-6 per check -- devnet-appropriate, see doc above
         }
     }
 }
@@ -74,6 +98,8 @@ pub fn prism_properties() -> sc_chain_spec::Properties {
     properties.insert(DIFFICULTY_SHIFT.into(), (params.difficulty_shift as u64).into());
     properties.insert(TARGET_INTERVAL_MS.into(), params.target_interval_ms.into());
     properties.insert(K_DEEP_CONFIRMATION.into(), params.k_deep_confirmation.into());
+    properties.insert(BETA_PERCENT.into(), params.beta_percent.into());
+    properties.insert(EPS_EXPONENT.into(), params.eps_exponent.into());
     properties
 }
 
@@ -105,6 +131,14 @@ pub fn prism_params_from_properties(properties: &sc_chain_spec::Properties) -> P
             .get(K_DEEP_CONFIRMATION)
             .and_then(|v| v.as_u64())
             .unwrap_or(defaults.k_deep_confirmation),
+        beta_percent: properties
+            .get(BETA_PERCENT)
+            .and_then(|v| v.as_u64())
+            .unwrap_or(defaults.beta_percent),
+        eps_exponent: properties
+            .get(EPS_EXPONENT)
+            .and_then(|v| v.as_u64())
+            .unwrap_or(defaults.eps_exponent),
     }
 }
 
@@ -241,6 +275,8 @@ mod tests {
         assert_eq!(read_back.difficulty_shift, defaults.difficulty_shift, "other fields unaffected");
         assert_eq!(read_back.target_interval_ms, defaults.target_interval_ms);
         assert_eq!(read_back.k_deep_confirmation, defaults.k_deep_confirmation);
+        assert_eq!(read_back.beta_percent, defaults.beta_percent);
+        assert_eq!(read_back.eps_exponent, defaults.eps_exponent);
     }
 
     /// An explicit override actually takes effect (not just "defaults always
@@ -253,5 +289,19 @@ mod tests {
         assert_eq!(read_back.m_voter_chains, 4);
         // Untouched fields still come from the written defaults.
         assert_eq!(read_back.target_interval_ms, PrismChainSpecParams::default().target_interval_ms);
+    }
+
+    /// B-15: `prismBetaPercent`/`prismEpsExponent` round-trip and override the
+    /// same way the pre-existing four properties do.
+    #[test]
+    fn beta_and_eps_properties_round_trip_and_override() {
+        let mut properties = prism_properties();
+        properties.insert(prism_property_keys::BETA_PERCENT.into(), 30u64.into());
+        properties.insert(prism_property_keys::EPS_EXPONENT.into(), 9u64.into());
+        let read_back = prism_params_from_properties(&properties);
+        assert_eq!(read_back.beta_percent, 30);
+        assert_eq!(read_back.eps_exponent, 9);
+        // Untouched fields still come from the written defaults.
+        assert_eq!(read_back.m_voter_chains, PrismChainSpecParams::default().m_voter_chains);
     }
 }

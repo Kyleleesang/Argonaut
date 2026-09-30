@@ -158,7 +158,7 @@ impl PrismLedger {
     /// the ledger delta at level ℓ can always assume every earlier level's
     /// txs have already been emitted.
     ///
-    /// B-4: tries stage-2's confidence-interval confirmation
+    /// B-4/B-15: tries stage-2's confidence-interval confirmation
     /// ([`confirmation::confirm_unique_leader`]) first, falling back to
     /// stage-1's conservative k-deep rule -- stage-2's list is guaranteed to
     /// contain the eventual leader, so a *uniquely* confirmed stage-2 leader
@@ -166,19 +166,21 @@ impl PrismLedger {
     /// Since this function is called repeatedly (every bridge wakeup, per
     /// AF-1), whichever rule fires first in real time is the one that ends
     /// up confirming the level -- there's no separate "race" to coordinate,
-    /// just checking both every time. Stage-2's numeric margin (`δ_d`) is
-    /// still a flagged placeholder (B-3, not yet the paper's derived
-    /// constant), so this is "faster when available, never less safe than
-    /// stage-1 alone" rather than a fully paper-faithful latency win yet.
+    /// just checking both every time. Stage-2's default margin is now B-3's
+    /// real derived one ([`confirmation::single_check_margin`]), which is
+    /// vacuous below ~400-deep votes at `m=100` -- see `confirmation.rs`'s
+    /// module doc's B-15 section for why this makes stage-2 an eventual
+    /// safety backstop for stage-1's unanimity weakness, not a latency win.
     pub fn advance(&mut self, chain: &PrismChain, k: u64) -> Vec<ConfirmedLevel> {
         self.advance_with_params(chain, k, &confirmation::ConfirmationParams::default())
     }
 
     /// Same as [`advance`](Self::advance), but with an explicit
     /// [`confirmation::ConfirmationParams`] instead of the default (which has
-    /// `stage2_enabled: false` -- see B-12's doc comment on that field). The
-    /// node threads `--prism-stage2` down to this so stage-2 can be
-    /// measured/compared without a rebuild (`node/src/bridge.rs`).
+    /// `stage2_enabled: true` as of B-15 -- see that field's doc comment).
+    /// The node builds its `ConfirmationParams` from chain-spec
+    /// `prismBetaPercent`/`prismEpsExponent` and `--prism-no-stage2`, then
+    /// threads the whole struct down to this (`node/src/bridge.rs`).
     pub fn advance_with_params(
         &mut self,
         chain: &PrismChain,
@@ -189,9 +191,18 @@ impl PrismLedger {
         loop {
             let next = self.confirmed_tip + 1;
             let stage2 = confirmation::confirm_unique_leader(chain, next, confirmation_params);
+            let via_stage2 = stage2.is_some();
             let Some(leader) = stage2.or_else(|| confirmed_leader_at_level(chain, next, k)) else {
                 break;
             };
+            // B-15: which rule fired is the live signal that stage-2 is
+            // evaluated-but-not-firing at shallow depth (stage-1 wins).
+            log::debug!(
+                target: "prism",
+                "level {} confirmed via {}",
+                next,
+                if via_stage2 { "stage-2" } else { "stage-1" },
+            );
             let txs = self.build_ledger_delta_for_leader(&leader);
             // The leader block's own timestamp -- deterministic across every
             // node that agrees on `leader` (it's part of what's hashed into

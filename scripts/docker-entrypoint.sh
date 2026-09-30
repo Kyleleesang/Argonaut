@@ -11,7 +11,9 @@ CHAIN="${CHAIN:-local}"
 VALIDATOR="${VALIDATOR:-false}"
 PRISM_PRUNE="${PRISM_PRUNE:-false}"
 PRISM_K_PRUNE="${PRISM_K_PRUNE:-60}"
-PRISM_STAGE2="${PRISM_STAGE2:-false}"
+# B-15: stage-2 is on by default in the node itself, so this knob is now an
+# opt-*out* (it was `PRISM_STAGE2`, an opt-in, while stage-2 was gated off).
+PRISM_NO_STAGE2="${PRISM_NO_STAGE2:-false}"
 NODE_KEY_FILE="${NODE_KEY_FILE:-}"
 BOOTNODES="${BOOTNODES:-}"
 PORT="${PORT:-30333}"
@@ -36,7 +38,7 @@ args=(
 
 [ "$VALIDATOR" = "true" ] && args+=(--validator)
 [ "$PRISM_PRUNE" = "true" ] && args+=(--prism-prune --prism-k-prune "$PRISM_K_PRUNE")
-[ "$PRISM_STAGE2" = "true" ] && args+=(--prism-stage2)
+[ "$PRISM_NO_STAGE2" = "true" ] && args+=(--prism-no-stage2)
 [ -n "$NODE_KEY_FILE" ] && args+=(--node-key-file "$NODE_KEY_FILE")
 
 if [ -n "$BOOTNODES" ]; then

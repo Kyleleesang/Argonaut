@@ -376,6 +376,7 @@ dependencies = [
  "argonaut-prism-chain",
  "argonaut-prism-db",
  "blake3",
+ "log",
  "parity-scale-codec",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",

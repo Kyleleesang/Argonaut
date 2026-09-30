@@ -107,11 +107,19 @@ mod paper_formula_tests {
 
     #[test]
     fn default_confirmation_params_are_unaffected_by_the_paper_formula_existing() {
-        // The practical default must still be the placeholder, not the
-        // paper's literal (impractically deep) constants -- see module docs.
+        // The practical default must use the real B-15 derived margin, not
+        // the paper's literal (impractically deep) constants -- see module
+        // docs.
         let params = ConfirmationParams::default();
         assert_eq!(params.k_min, 1);
-        assert_eq!((params.delta_d)(5, 20), placeholder_delta_d(5, 20));
+        match params.margin {
+            MarginPolicy::SingleCheck { beta, eps_target } => {
+                assert_eq!(beta, ASSUMED_ADVERSARY_FRACTION);
+                assert_eq!(eps_target, 1e-6);
+            },
+            MarginPolicy::Custom(_) =>
+                panic!("default must use the real derived SingleCheck margin, not a Custom fn"),
+        }
     }
 }
 
@@ -208,7 +216,7 @@ mod single_check_margin_tests {
 
     /// B-15: the example preset is correctly wired -- `stage2_enabled` is on
     /// (self-contained, usable as-is if plugged into `advance_with_params`)
-    /// and `delta_d` actually delegates to `single_check_margin` at the
+    /// and `margin` actually delegates to `single_check_margin` at the
     /// documented `(β=0.25, ε_target=1e-6)` point, not some other formula.
     #[test]
     fn example_single_check_confirmation_params_is_wired_correctly() {
@@ -217,9 +225,9 @@ mod single_check_margin_tests {
         assert_eq!(params.k_min, 0);
         for &(depth, m) in &[(1_500u64, 100u64), (2_000, 1_000)] {
             assert_eq!(
-                (params.delta_d)(depth, m),
+                params.margin.margin(depth, m),
                 single_check_margin(depth, m, ASSUMED_ADVERSARY_FRACTION, 1e-6),
-                "delta_d must delegate to single_check_margin at the documented operating point"
+                "margin must delegate to single_check_margin at the documented operating point"
             );
         }
     }
@@ -243,7 +251,14 @@ mod lower_bound_from_depths_tests {
 
     #[test]
     fn five_deep_votes_matches_hand_computed_value() {
-        let params = ConfirmationParams::default();
+        // Hand-computed against the placeholder specifically (see below) --
+        // post-B-15, the real default margin is vacuous at this small m=6/
+        // depth=9 scale (by design; see the module doc's `k≈400` threshold),
+        // so pin the placeholder explicitly for this numeric check.
+        let params = ConfirmationParams {
+            margin: MarginPolicy::Custom(placeholder_delta_d),
+            ..ConfirmationParams::default()
+        };
         // At k=9 (the deepest k where all 5 still count), margin =
         // placeholder_delta_d(9, 6) * 6 = 6/sqrt(10*6) ~= 0.7746.
         // floor(5 - 0.7746) = 4.
@@ -283,17 +298,83 @@ fn build_contested_level() -> (PrismChain, H256, H256) {
 #[test]
 fn confirm_proposer_list_excludes_the_far_behind_sibling() {
     let (chain, p1_hash, _p2_hash) = build_contested_level();
-    let params = ConfirmationParams::default();
+    // B-15: the real default margin is vacuous at this test's small m=6/
+    // depth=9 scale (by design) -- pin the pre-B-15 placeholder explicitly.
+    let params = ConfirmationParams {
+        margin: MarginPolicy::Custom(placeholder_delta_d),
+        ..ConfirmationParams::default()
+    };
     assert_eq!(confirm_proposer_list(&chain, 1, &params), vec![p1_hash]);
 }
 
 #[test]
 fn confirm_unique_leader_declares_p1_once_its_lower_bound_beats_p2s_upper() {
     let (chain, p1_hash, _p2_hash) = build_contested_level();
-    // B-12: stage2_enabled is off by default; this test exercises
-    // confirm_unique_leader's math directly, so opt it on explicitly.
-    let params = ConfirmationParams { stage2_enabled: true, ..ConfirmationParams::default() };
+    // B-15: stage2_enabled is on by default, but the real margin is vacuous
+    // at this test's small m=6/depth=9 scale -- pin the pre-B-15 placeholder
+    // explicitly so this test still exercises confirm_unique_leader's math.
+    let params = ConfirmationParams {
+        stage2_enabled: true,
+        margin: MarginPolicy::Custom(placeholder_delta_d),
+        ..ConfirmationParams::default()
+    };
     assert_eq!(confirm_unique_leader(&chain, 1, &params), Some(p1_hash));
+}
+
+/// Eq. (35)'s *private-block* bound applies to unique-leader confirmation too,
+/// not just to `confirm_proposer_list`'s own gate. A proposer nobody has seen
+/// yet can still collect every vote no public proposer has provably locked in
+/// (`m − Σ lower bounds`); confirming a unique leader whose lower bound
+/// doesn't clear that is unsound, because the bridge finalizes irreversibly
+/// (`node/src/bridge.rs` imports every confirmed level `finalized: true`, with
+/// no reorg path) -- the withheld block could surface afterward and win.
+///
+/// The invariant asserted here is the load-bearing one: a *uniquely* confirmed
+/// leader is by definition the sole member of the confirmed list, so the two
+/// rules must never disagree about whether the level is confirmable at all.
+#[test]
+fn a_unique_leader_is_never_confirmed_while_a_private_proposer_could_still_beat_it() {
+    // m=4, an honest 3-1 split, every vote equally deep. p1's lower bound is
+    // 2 (3 votes minus the margin); p2's is 0; so a withheld proposer could
+    // still hold `4 - 2 = 2` votes -- exactly p1's own lower bound, which
+    // therefore does not *strictly* beat it.
+    let mut chain = PrismChain::new(params(4));
+    let genesis = chain.proposer_genesis;
+    let mut nonce = 2000u64;
+
+    let p1 = proposer_block(1, genesis);
+    let p1_hash = block_hash(&p1.header);
+    chain.insert_block(p1);
+    let p2 = proposer_block(2, genesis);
+    let p2_hash = block_hash(&p2.header);
+    chain.insert_block(p2);
+
+    for c in 0..4u16 {
+        nonce += 1;
+        let vote = if c < 3 { p1_hash } else { p2_hash };
+        chain.insert_block(voter_block(nonce, c, chain.voter_genesis[c as usize], vec![vote]));
+        extend(&mut chain, c, 8, &mut nonce);
+    }
+
+    let params = ConfirmationParams {
+        stage2_enabled: true,
+        margin: MarginPolicy::Custom(placeholder_delta_d),
+        ..ConfirmationParams::default()
+    };
+
+    // Sanity: this is the regime the bound is about -- p1 leads, but not by
+    // enough to rule out a withheld rival.
+    assert_eq!(
+        confirm_proposer_list(&chain, 1, &params),
+        Vec::<H256>::new(),
+        "eq. (35): the level is not confirmable at all while a private proposer could tie p1"
+    );
+    assert_eq!(
+        confirm_unique_leader(&chain, 1, &params),
+        None,
+        "confirm_unique_leader must respect the same private-block bound as confirm_proposer_list \
+         -- confirming here would let a withheld proposer beat an already-finalized leader"
+    );
 }
 
 #[test]
@@ -330,8 +411,14 @@ fn single_proposer_with_full_deep_votes_is_confirmed_alone() {
         extend(&mut chain, c, 9, &mut nonce);
     }
 
-    // B-12: opt stage-2 on -- this test exercises confirm_unique_leader's math.
-    let params = ConfirmationParams { stage2_enabled: true, ..ConfirmationParams::default() };
+    // B-15: the real default margin is vacuous at this test's small m=5/
+    // depth=9 scale -- pin the pre-B-15 placeholder explicitly so this test
+    // still exercises confirm_unique_leader's math.
+    let params = ConfirmationParams {
+        stage2_enabled: true,
+        margin: MarginPolicy::Custom(placeholder_delta_d),
+        ..ConfirmationParams::default()
+    };
     assert_eq!(confirm_proposer_list(&chain, 1, &params), vec![p1_hash]);
     assert_eq!(confirm_unique_leader(&chain, 1, &params), Some(p1_hash));
 }
@@ -370,9 +457,15 @@ fn evenly_matched_contenders_confirm_as_a_list_but_not_a_unique_leader() {
         extend(&mut chain, c, 9, &mut nonce);
     }
 
-    // B-12: opt stage-2 on -- this test's point is that confirm_unique_leader
-    // returns None on the MATH (evenly matched), not on the gate.
-    let params = ConfirmationParams { stage2_enabled: true, ..ConfirmationParams::default() };
+    // B-15: the real default margin is vacuous at this test's small m=8/
+    // depth=9 scale -- pin the pre-B-15 placeholder explicitly. This test's
+    // point is that confirm_unique_leader returns None on the MATH (evenly
+    // matched), not on the gate or on a vacuous margin.
+    let params = ConfirmationParams {
+        stage2_enabled: true,
+        margin: MarginPolicy::Custom(placeholder_delta_d),
+        ..ConfirmationParams::default()
+    };
     let mut list = confirm_proposer_list(&chain, 1, &params);
     list.sort();
     let mut expected = vec![p1_hash, p2_hash];

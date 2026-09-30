@@ -114,14 +114,15 @@ pub fn new_partial(config: &Configuration) -> Result<Service, ServiceError> {
 ///
 /// `prism_prune`/`prism_k_prune` are `--prism-prune`/`--prism-k-prune` off
 /// `node/src/cli.rs`, threaded down to `run_prism_bridge` (see B5 pruning,
-/// `docs/IMPLEMENTATION_AB_FIXPLAN.md`'s "Then: B5 (pruning)"). `prism_stage2`
-/// is `--prism-stage2` (B-12), off by default -- see its doc comment in
-/// `node/src/cli.rs`.
+/// `docs/IMPLEMENTATION_AB_FIXPLAN.md`'s "Then: B5 (pruning)"). `prism_no_stage2`
+/// is `--prism-no-stage2` (B-15) -- stage-2 is on by default, using the
+/// chain spec's `prismBetaPercent`/`prismEpsExponent`; this flag opts back
+/// out to stage-1 alone. See its doc comment in `node/src/cli.rs`.
 pub fn new_full<N: sc_network::NetworkBackend<Block, <Block as sp_runtime::traits::Block>::Hash>>(
     config: Configuration,
     prism_prune: bool,
     prism_k_prune: u64,
-    prism_stage2: bool,
+    prism_no_stage2: bool,
 ) -> Result<TaskManager, ServiceError> {
     let sc_service::PartialComponents {
         client,
@@ -212,6 +213,53 @@ pub fn new_full<N: sc_network::NetworkBackend<Block, <Block as sp_runtime::trait
     );
     let prism_chain = Arc::new(Mutex::new(PrismChain::with_db(prism_params.clone(), prism_db.clone())));
 
+    // B-15: chain-spec-driven β/ε (`prismBetaPercent`/`prismEpsExponent`)
+    // feed stage-2's real derived margin; `stage2_enabled` is on unless
+    // `--prism-no-stage2` opts back out to stage-1 alone.
+    //
+    // Both are clamped, because both are raw `u64`s straight off a JSON
+    // chain spec (`prism_params_from_properties` deliberately falls back
+    // rather than erroring, so an out-of-range value arrives here intact) and
+    // both feed a formula that is *not* monotone outside its intended domain:
+    // - β: `gamma()` is `(1/36)(1-2β)²`, so β past `0.5` starts *growing*
+    //   again -- β=2.0 would yield a larger γ than β=0.25 and thus a
+    //   tighter-looking margin, exactly inverted from the truth. The paper's
+    //   own safety limit is `β < 0.5`; clamp just below it (49%) so a
+    //   fat-fingered property can only ever make stage-2 more conservative.
+    // - ε exponent: `as i32` on a `u64` truncates (a value ≥ 2³¹ could wrap
+    //   to a *positive* exponent, i.e. `eps_target` ≥ 1 and a vacuously
+    //   permissive margin). Cap at 300, far past the ≥9 the module doc
+    //   recommends for real value and still finite in `f64`.
+    let beta_percent = prism_chain_spec_params.beta_percent.min(49);
+    let eps_exponent = prism_chain_spec_params.eps_exponent.clamp(1, 300);
+    if beta_percent != prism_chain_spec_params.beta_percent
+        || eps_exponent != prism_chain_spec_params.eps_exponent
+    {
+        log::warn!(
+            target: "prism",
+            "chain spec's prismBetaPercent={}/prismEpsExponent={} out of range; clamped to {}/{}",
+            prism_chain_spec_params.beta_percent,
+            prism_chain_spec_params.eps_exponent,
+            beta_percent,
+            eps_exponent,
+        );
+    }
+    let confirmation_params = argonaut_prism_ledger::confirmation::ConfirmationParams {
+        margin: argonaut_prism_ledger::confirmation::MarginPolicy::SingleCheck {
+            beta: beta_percent as f64 / 100.0,
+            eps_target: 10f64.powi(-(eps_exponent as i32)),
+        },
+        stage2_enabled: !prism_no_stage2,
+        ..Default::default()
+    };
+    log::info!(
+        target: "prism",
+        "confirmation: stage-2 {} (beta={}%, eps=1e-{})",
+        if prism_no_stage2 { "disabled" } else { "enabled" },
+        beta_percent,
+        eps_exponent,
+    );
+
     // AF-1: shared between the network worker (signals it whenever an
     // accepted block's `may_confirm` comes back true) and the bridge task
     // (wakes on it instead of polling on a fixed timer).
@@ -244,7 +292,7 @@ pub fn new_full<N: sc_network::NetworkBackend<Block, <Block as sp_runtime::trait
             confirmation_notify,
             prism_prune,
             prism_k_prune,
-            prism_stage2,
+            confirmation_params,
         ),
     );
 

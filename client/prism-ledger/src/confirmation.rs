@@ -50,13 +50,15 @@
 //! stage-2 require ~500x the depth stage-1 needs before it even starts
 //! looking at a vote -- strictly *slower* than stage-1, contradicting the
 //! paper's own premise that aggregating across `m` chains is the faster
-//! path. [`placeholder_delta_d`] remains the actual default: right
+//! path. [`placeholder_delta_d`] was the default through B-15 (below): right
 //! qualitative shape (shrinks with depth and `m`), usable at the depths this
-//! codebase's tests and devnets actually reach. `paper_k_min`/`paper_delta_d`
-//! are kept, faithfully computed and unit-tested against the paper's own
-//! numbers, for whoever eventually needs the rigorous asymptotic guarantee
-//! (e.g. choosing parameters for a long-lived mainnet where thousands of
-//! blocks of depth is an acceptable wait).
+//! codebase's tests and devnets actually reach, but not a proven safety
+//! margin -- see [`MarginPolicy::Custom`]'s doc for where it still lives (test
+//! pins only, post-B-15). `paper_k_min`/`paper_delta_d` are kept, faithfully
+//! computed and unit-tested against the paper's own numbers, for whoever
+//! eventually needs the rigorous asymptotic guarantee (e.g. choosing
+//! parameters for a long-lived mainnet where thousands of blocks of depth is
+//! an acceptable wait).
 //!
 //! # B-3 (2026-07-14): a practical middle ground, [`single_check_margin`]
 //! The "astronomically large round count" the previous paragraph refers to is
@@ -68,21 +70,44 @@
 //! probability, without the union step, gives a real, Monte-Carlo-validated
 //! margin at depths in the low thousands rather than ~7,900-13,000. See
 //! [`single_check_margin`]'s doc for the derivation, the numbers, and --
-//! important -- what it does and doesn't guarantee. Still not wired in as a
-//! default; needs a reviewed `ε_target` choice first.
+//! important -- what it does and doesn't guarantee. As of B-15 (below) this
+//! *is* wired in as the default, at the reviewed `ε_target = 1e-6`/check
+//! operating point (chain-spec-overridable -- see the B-15 section).
 //!
-//! # B-15: this is what unblocks fixing stage-1's unanimity weakness
+//! # B-15 (2026-07-22): stage-2 on by default, with the real margin
 //! Stage-1 (`confirmed_leader_at_level`) requires literally every one of the
 //! `m` voter chains to vote -- one censored or offline chain stalls
 //! confirmation forever, no matter the depth. Stage-2 is the paper's own
 //! designed way around that (it needs a *statistical* majority, not
 //! unanimity -- see `stage2_latency_tests.rs`'s B-4 measurements for exactly
-//! how much that buys in practice), but only once its confidence margin is
-//! real. [`example_single_check_confirmation_params_beta025_eps1e6`] is a
-//! ready-to-use (if reviewed) `ConfirmationParams` built on
-//! [`single_check_margin`] -- B-15 is "resolved" in the sense that the tool
-//! now exists; actually turning it on for a given deployment is still a
-//! reviewed decision, not a default this crate makes for you.
+//! how much that buys in practice). [`ConfirmationParams::default`] now sets
+//! `stage2_enabled: true` with `margin: `[`MarginPolicy::SingleCheck`]` { beta:
+//! `[`ASSUMED_ADVERSARY_FRACTION`]`, eps_target: 1e-6 }` -- β and the ε
+//! exponent are chain-spec properties in production (`prismBetaPercent`/
+//! `prismEpsExponent`, `node/src/chain_spec.rs`), not hardcoded past this
+//! crate's default.
+//!
+//! **Read this before expecting a latency win:** at `m=100` (this repo's
+//! `Params::testnet()`) the real margin is *vacuous* below `k≈400` (see
+//! [`single_check_margin`]'s doc comment) -- stage-2 simply won't confirm
+//! anything shallower than that. So with the real margin, stage-2 is **not**
+//! faster than stage-1 in the common case; it's a provably-safe *eventual
+//! backstop*: when stage-1 stalls forever on a permanently-silent chain,
+//! stage-2 still confirms once the surviving chains' votes get a few hundred
+//! blocks deep (hours, not never). When stage-1 works normally, it wins the
+//! race in `PrismLedger::advance` and stage-2 costs nothing. Tests that need
+//! to exercise stage-2 confirming at shallow depth (the old placeholder's
+//! behavior) pin `margin: `[`MarginPolicy::Custom`]`(placeholder_delta_d)`
+//! explicitly -- see that variant's doc comment for the list.
+//!
+//! **ε sizing.** `eps_target` is a *per-check* permanent-split probability
+//! (the bridge finalizes with no reorg path -- see [`single_check_margin`]'s
+//! "does NOT prove" section for the full derivation of why lifetime risk
+//! needs a much smaller value than a single check's). `1e-6`/check
+//! (`prismEpsExponent = 6`) is fine for a devnet; a deployment holding real
+//! value should raise `prismEpsExponent` to `9`+ -- the margin floor grows
+//! only logarithmically with tighter ε (`−ln(ε)/m`: 13.8%→20.7% at `m=100`
+//! going `1e-6`→`1e-9`), so this is cheap insurance, not a latency cliff.
 use argonaut_prism_chain::PrismChain;
 use argonaut_primitives_prism::H256;
 
@@ -176,12 +201,10 @@ pub fn paper_delta_d(depth: u64, m: u64, beta: f64) -> f64 {
 /// checked probability *at all*, at a depth in the low thousands instead of
 /// ~13,000, is a genuine improvement) but it is **not** "confirm in tens of
 /// blocks" -- that would need either a much larger `m` or accepting a looser
-/// `ε_target`. Treat this as a real, numerically-validated building block for
-/// a production operating point, not a drop-in replacement for
-/// [`placeholder_delta_d`] -- deliberately not wired in as
-/// [`ConfirmationParams::default`]; needs an explicit, reviewed choice of
-/// `ε_target` and the deployment's real expected round count first (see
-/// `docs/IMPLEMENTATION_AB_FIXPLAN.md`'s B-3 entry).
+/// `ε_target`. As of B-15, this operating point (`β=0.25`, `ε_target=1e-6`
+/// per check) *is* [`ConfirmationParams::default`]'s margin -- see the module
+/// doc's B-15 section for the vacuous-below-`k≈400` caveat and the ε sizing
+/// guidance for deployments holding real value.
 pub fn single_check_margin(depth: u64, m: u64, beta: f64, eps_target: f64) -> f64 {
     let g = gamma(beta);
     let mu_bar = 4.0 * (-g * depth as f64 / 2.0).exp();
@@ -190,78 +213,111 @@ pub fn single_check_margin(depth: u64, m: u64, beta: f64, eps_target: f64) -> f6
     mu_bar + a
 }
 
-/// B-15: [`ConfirmationParams::delta_d`] is a plain `fn(u64, u64) -> f64`
-/// (no closures -- see the type's own definition), so a specific
-/// [`single_check_margin`] operating point needs a *named* function with
-/// exactly that two-argument shape to actually be pluggable. This is the
-/// EXAMPLE illustrated in [`single_check_margin`]'s own doc comment
-/// (`β=0.25`, `ε_target=1e-6` per check) -- not a recommendation, not wired
-/// in anywhere. `k_min` in the returned [`ConfirmationParams`] is `0`
-/// deliberately: unlike the paper's `k_min`, this formula has no hard cutoff
-/// below which it's invalid, only a *vacuous* one (`ρ≥1`, see the doc
-/// comment's `k≈400` non-vacuous threshold at m=100) -- `confirm_unique_leader`
+/// B-15: a ready-to-use [`ConfirmationParams`] at the same `(β=0.25,
+/// ε_target=1e-6)` operating point as [`ConfirmationParams::default`] itself
+/// (that default *is* this preset, modulo `k_min`) -- kept as a separate,
+/// explicitly-named function for callers who want `k_min: 0` rather than the
+/// default's `k_min: 1`. `k_min: 0` is safe here because, unlike the paper's
+/// `k_min`, [`single_check_margin`] has no hard cutoff below which it's
+/// invalid, only a *vacuous* one (`ρ≥1`, see that function's doc comment for
+/// the `k≈400` non-vacuous threshold at `m=100`) -- `confirm_unique_leader`
 /// simply won't confirm anything while the margin is that large, so no
-/// separate gate is needed; the shape of the curve does the gating.
+/// separate `k_min` gate is needed; the shape of the curve does the gating.
 ///
-/// # Before using this for anything but experimentation
+/// # Before using a *different* operating point than this for production
 /// 1. Pick your own `ε_target` from your deployment's real expected
 ///    confirmation-check count and acceptable lifetime failure budget (see
 ///    [`single_check_margin`]'s doc comment for the arithmetic) -- `1e-6`
-///    here is illustrative, not a recommendation.
-/// 2. Confirm your deployment's real `m` (`Params::m_voter_chains`, now
-///    chain-spec-driven -- B-16) and re-derive the constant below for it;
-///    this example is hardcoded to `β=0.25`, matching
-///    [`crate::confirmation::ASSUMED_ADVERSARY_FRACTION`].
+///    here is a devnet-appropriate default, not a mainnet recommendation
+///    (see the module doc's ε sizing note).
+/// 2. Confirm your deployment's real `m` (`Params::m_voter_chains`, chain-
+///    spec-driven -- B-16) and `β` (`prismBetaPercent`, chain-spec-driven --
+///    B-15).
 /// 3. Have someone independently check the math (or at minimum, run
 ///    `single_check_margin_tests`'s Monte Carlo cross-check against your own
 ///    chosen `(m, k, ε_target)`) before treating this as a security boundary.
 pub fn example_single_check_confirmation_params_beta025_eps1e6() -> ConfirmationParams {
-    fn delta_d_beta025_eps1e6(depth: u64, m: u64) -> f64 {
-        single_check_margin(depth, m, ASSUMED_ADVERSARY_FRACTION, 1e-6)
+    ConfirmationParams {
+        k_min: 0,
+        margin: MarginPolicy::SingleCheck { beta: ASSUMED_ADVERSARY_FRACTION, eps_target: 1e-6 },
+        stage2_enabled: true,
     }
-    // stage2_enabled: true -- this is a self-contained, explicit choice at
-    // whatever call site plugs it in (e.g. via `advance_with_params`
-    // directly), separate from the bridge's own `--prism-stage2` CLI switch
-    // (which flips `ConfirmationParams::default()`'s flag, not this one). A
-    // caller reaching for this function by name has already opted in.
-    ConfirmationParams { k_min: 0, delta_d: delta_d_beta025_eps1e6, stage2_enabled: true }
 }
 
 /// NOT the paper's derived bound -- see module docs. Returns a margin
 /// *fraction* of `m` (multiply by `m` to get a vote-count margin, as (33)
-/// does with `delta_d(k)*m`).
+/// does with `delta_d(k)*m`). Pre-B-15 this was the operational default
+/// ([`MarginPolicy::Custom`]); post-B-15 it survives only as an explicit test
+/// pin for tests that specifically exercise stage-2 confirming at shallow
+/// depth, where the real ([`MarginPolicy::SingleCheck`]) margin would be
+/// vacuous -- see [`MarginPolicy::Custom`]'s doc comment for the list.
 pub fn placeholder_delta_d(depth: u64, m: u64) -> f64 {
     1.0 / (((depth + 1) * m.max(1)) as f64).sqrt()
 }
 
 pub type DeltaDFn = fn(u64, u64) -> f64;
 
+/// B-15: the confidence margin `ConfirmationParams` uses, as a policy rather
+/// than a bare `fn` pointer -- a bare `DeltaDFn` can't capture the runtime
+/// `(β, ε_target)` values a chain spec provides (`node/src/chain_spec.rs`'s
+/// `prismBetaPercent`/`prismEpsExponent`), only compile-time constants.
+#[derive(Clone, Copy)]
+pub enum MarginPolicy {
+    /// An explicit `fn(depth, m) -> margin_fraction`, bypassing
+    /// [`single_check_margin`] entirely. Production code has no reason to use
+    /// this post-B-15; it exists so tests that specifically exercise
+    /// stage-2's *rule structure* at shallow depths (where the real margin is
+    /// vacuous) can pin the old [`placeholder_delta_d`] and say so explicitly
+    /// -- the 4 `confirm_unique_leader` tests in `confirmation/tests.rs`,
+    /// both `stage2_latency_tests.rs` tests,
+    /// `persistent_balancing_attacker_stalls_stage1_alone_but_not_the_system`
+    /// (`adversarial_tests.rs`), and
+    /// `any_real_skew_in_an_honest_split_still_resolves_via_stage_2`
+    /// (`honest_split_tests.rs`).
+    Custom(DeltaDFn),
+    /// [`single_check_margin`]'s derived, Monte-Carlo-validated margin (B-3),
+    /// parametrized by the deployment's assumed adversary fraction and
+    /// per-check target failure probability. [`ConfirmationParams::default`]
+    /// uses this at `(β=0.25, ε_target=1e-6)` -- see the module doc's B-15
+    /// section for what this does and doesn't guarantee.
+    SingleCheck { beta: f64, eps_target: f64 },
+}
+
+impl MarginPolicy {
+    fn margin(&self, depth: u64, m: u64) -> f64 {
+        match *self {
+            MarginPolicy::Custom(f) => f(depth, m),
+            MarginPolicy::SingleCheck { beta, eps_target } =>
+                single_check_margin(depth, m, beta, eps_target),
+        }
+    }
+}
+
 pub struct ConfirmationParams {
     /// Paper's `k_min`: votes shallower than this never count toward a lower
     /// bound. `1` is a practical default -- see the module docs for why this
     /// is deliberately not [`paper_k_min`]'s literal (much larger) value.
     pub k_min: u64,
-    pub delta_d: DeltaDFn,
-    /// B-12: gates [`confirm_unique_leader`] entirely. **Off by default.**
+    pub margin: MarginPolicy,
+    /// Gates [`confirm_unique_leader`] entirely. **On by default (B-15).**
     /// `advance` (`client/prism-ledger/src/lib.rs`) tries stage-2 *first*,
     /// falling back to stage-1's conservative k-deep rule only if stage-2
-    /// returns `None` -- but stage-2's live `delta_d` here is
-    /// [`placeholder_delta_d`], which the module doc above says explicitly
-    /// is **not a real safety margin** (the paper's exact `delta_d`/`k_min`,
-    /// [`paper_delta_d`]/[`paper_k_min`], are impractically deep to use as
-    /// the default -- see the module doc's "not the default" section). So
-    /// with stage-2 live, the bridge's irreversible finality (every
-    /// confirmed level is imported `finalized: true`, no reorg path) rested
-    /// on an unproven confidence margin. Until a real operating point for
-    /// `delta_d`/`k_min` is derived (B-3), stage-1-only is the safe default.
-    /// Also doubles as the B-4 measurement toggle: flip this to compare
-    /// confirmed-level latency with stage-2 on vs. off.
+    /// returns `None`. With the real [`MarginPolicy::SingleCheck`] margin (the
+    /// default `margin`), this is safe to leave on: the module doc's B-15
+    /// section explains why it's a backstop for stage-1's unanimity weakness
+    /// rather than a latency win. Set `false` to fall back to stage-1 alone
+    /// (e.g. `--prism-no-stage2`, `node/src/cli.rs`), or to isolate
+    /// stage-1-only latency measurements the way B-4 originally did.
     pub stage2_enabled: bool,
 }
 
 impl Default for ConfirmationParams {
     fn default() -> Self {
-        ConfirmationParams { k_min: 1, delta_d: placeholder_delta_d, stage2_enabled: false }
+        ConfirmationParams {
+            k_min: 1,
+            margin: MarginPolicy::SingleCheck { beta: ASSUMED_ADVERSARY_FRACTION, eps_target: 1e-6 },
+            stage2_enabled: true,
+        }
     }
 }
 
@@ -290,7 +346,7 @@ fn lower_bound_from_depths(depths: &[u64], params: &ConfirmationParams, m: u64) 
     (params.k_min..=max_depth.max(params.k_min))
         .map(|k| {
             let raw = depths.iter().filter(|&&d| d >= k).count() as f64;
-            let margin = (params.delta_d)(k, m) * m as f64;
+            let margin = params.margin.margin(k, m) * m as f64;
             (raw - margin).max(0.0)
         })
         .fold(0.0_f64, f64::max)
@@ -353,13 +409,26 @@ pub fn confirm_proposer_list(chain: &PrismChain, level: u64, params: &Confirmati
 
 /// Strengthening beyond the paper's own list-confirmation (per architecture
 /// guide §3.8): a proposer is confirmed as the *unique* leader, not just a
-/// list member, once its own lower bound alone already exceeds every rival's
-/// upper bound -- at that point no future event (more votes, a revealed
-/// private block) can change the outcome, since even each rival's best case
-/// falls short of what this proposer has already locked in.
+/// list member, once its own lower bound alone already exceeds the best case
+/// of every rival it could still lose to -- at that point no future event can
+/// change the outcome. "Every rival" is two distinct things, and both are
+/// checked below:
+/// 1. each *visible* competing proposer at this level, via its `v_upper`; and
+/// 2. the *invisible* one -- a proposer mined and withheld, bounded by eq.
+///    (35)'s `m − Σ lower bounds`, identically to [`confirm_proposer_list`].
+///
+/// Only (1) was checked until 2026-07-28. Because a withheld block is by
+/// definition absent from `proposers_at_level`, omitting (2) meant a level
+/// with a single *visible* proposer compared against no rivals at all
+/// (`max().unwrap_or(0)`) and so confirmed on any lower bound whatsoever --
+/// see `confirmation/tests.rs`'s
+/// `a_unique_leader_is_never_confirmed_while_a_private_proposer_could_still_beat_it`
+/// for the concrete case where this rule and [`confirm_proposer_list`]
+/// disagreed about whether a level was confirmable at all.
 pub fn confirm_unique_leader(chain: &PrismChain, level: u64, params: &ConfirmationParams) -> Option<H256> {
-    // B-12: off by default -- see `ConfirmationParams::stage2_enabled`'s doc
-    // comment for why an unproven confidence margin must not gate finality.
+    // B-15: on by default -- see `ConfirmationParams::stage2_enabled`'s doc
+    // comment, and the module doc's B-15 section for why the real derived
+    // margin makes that safe.
     if !params.stage2_enabled {
         return None;
     }
@@ -379,10 +448,25 @@ pub fn confirm_unique_leader(chain: &PrismChain, level: u64, params: &Confirmati
         })
         .collect();
 
+    // Eq. (35)'s private-block bound, exactly as `confirm_proposer_list`
+    // applies it -- and load-bearing here for the same reason. A proposer
+    // this node has never seen (mined and deliberately withheld) is absent
+    // from `proposers_at_level`, so it contributes nothing to `bounds`; the
+    // votes it could still end up holding are precisely the ones no *visible*
+    // proposer has provably locked in. Without this term the rule compares a
+    // candidate only against rivals it can see, and in the single-visible-
+    // proposer case `rivals_max_upper` degenerates to `unwrap_or(0)` -- so any
+    // lower bound at all would "uniquely" win a level a withheld block could
+    // still take. That is unsound anywhere, but especially here: `advance`
+    // hands confirmed levels to `node/src/bridge.rs`, which imports each one
+    // `finalized: true` with no reorg path, so a leader beaten after the fact
+    // is a permanent split rather than a recoverable one.
+    let v_bar_private = m.saturating_sub(bounds.iter().map(|&(_, lo, _)| lo).sum());
+
     bounds.iter().find_map(|&(p, lo, _)| {
         let rivals_max_upper =
             bounds.iter().filter(|&&(q, _, _)| q != p).map(|&(_, _, hi)| hi).max().unwrap_or(0);
-        (lo > rivals_max_upper).then_some(p)
+        (lo > rivals_max_upper.max(v_bar_private)).then_some(p)
     })
 }
 

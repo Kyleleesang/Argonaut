@@ -40,7 +40,7 @@ pub fn run() -> sc_cli::Result<()> {
     let cli = Cli::parse();
     let prism_prune = cli.prism_prune;
     let prism_k_prune = cli.prism_k_prune;
-    let prism_stage2 = cli.prism_stage2;
+    let prism_no_stage2 = cli.prism_no_stage2;
 
     match &cli.subcommand {
         Some(Subcommand::Key(cmd)) => cmd.run(&cli),
@@ -191,14 +191,14 @@ pub fn run() -> sc_cli::Result<()> {
                         service::new_full::<sc_network::NetworkWorker<
                             Block,
                             <Block as sp_runtime::traits::Block>::Hash,
-                        >>(config, prism_prune, prism_k_prune, prism_stage2)
+                        >>(config, prism_prune, prism_k_prune, prism_no_stage2)
                         .map_err(sc_cli::Error::Service),
                     sc_network::config::NetworkBackendType::Litep2p =>
                         service::new_full::<sc_network::Litep2pNetworkBackend>(
                             config,
                             prism_prune,
                             prism_k_prune,
-                            prism_stage2,
+                            prism_no_stage2,
                         )
                         .map_err(sc_cli::Error::Service),
                 }

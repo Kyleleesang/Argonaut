@@ -143,12 +143,22 @@ fn exact_even_split_between_two_honest_proposers_never_confirms() {
 
 #[test]
 fn any_real_skew_in_an_honest_split_still_resolves_via_stage_2() {
-    // Same setup as the tie above, except the split is 3-1 instead of 2-2 --
+    // Same setup as the tie above, except the split is 7-1 instead of 2-2 --
     // still purely honest (no attacker, no reorg, no vote ever changes once
     // cast), just a less even accident of propagation timing. Contrasts with
-    // the tie test: any genuine asymmetry, however small, is enough for
-    // stage-2 to eventually confirm.
-    let (_dir, mut chain, db) = setup(4);
+    // the tie test: a genuine asymmetry is enough for stage-2 to eventually
+    // confirm.
+    //
+    // `m=8`, not the `m=4`/3-1 this test used before the eq. (35) private-
+    // block bound was added to `confirm_unique_leader`: at m=4 a 3-vote
+    // majority's lower bound tops out at `floor(3 - margin) = 2`, which is
+    // exactly `v_bar_private = 4 - 2`, so a *withheld* proposer could still
+    // tie it -- correctly unconfirmable at any depth, and the reason this
+    // test passed only while that bound was missing. The claim under test is
+    // about honest skew resolving via stage-2, not about the smallest `m`
+    // where it does, so `m=8` (lower bound 6 vs `v_bar_private` 2) exercises
+    // it with the margin the rule actually requires.
+    let (_dir, mut chain, db) = setup(8);
     let genesis = chain.proposer_genesis;
     let mut nonce = 1000u64;
 
@@ -159,19 +169,24 @@ fn any_real_skew_in_an_honest_split_still_resolves_via_stage_2() {
     let p2_hash = block_hash(&p2.header);
     chain.insert_block(p2);
 
-    honest_group_votes_once(&mut chain, &[0, 1, 2], p1_hash, &mut nonce);
-    honest_group_votes_once(&mut chain, &[3], p2_hash, &mut nonce);
+    honest_group_votes_once(&mut chain, &[0, 1, 2, 3, 4, 5, 6], p1_hash, &mut nonce);
+    honest_group_votes_once(&mut chain, &[7], p2_hash, &mut nonce);
 
     let mut ledger = PrismLedger::new(db);
-    // B-12: stage2_enabled is off by default; this test's whole point is that
-    // stage-2 confirms a genuine (even 3-1) skew that stage-1 alone never
-    // would (chain 3 dissents forever), so opt it on explicitly.
-    let confirmation_params =
-        confirmation::ConfirmationParams { stage2_enabled: true, ..Default::default() };
+    // B-15: post-B-15, stage2_enabled is on by default, but the real
+    // (SingleCheck) margin is vacuous at the shallow depths (<50 rounds) this
+    // test runs at -- pin the pre-B-15 placeholder explicitly so this test
+    // still exercises stage-2 confirming a genuine (even 3-1) skew that
+    // stage-1 alone never would (chain 3 dissents forever).
+    let confirmation_params = confirmation::ConfirmationParams {
+        stage2_enabled: true,
+        margin: confirmation::MarginPolicy::Custom(confirmation::placeholder_delta_d),
+        ..Default::default()
+    };
     let mut confirmed_leader = None;
     for _ in 0..50u64 {
-        extend_group(&mut chain, &[0, 1, 2], &mut nonce);
-        extend_group(&mut chain, &[3], &mut nonce);
+        extend_group(&mut chain, &[0, 1, 2, 3, 4, 5, 6], &mut nonce);
+        extend_group(&mut chain, &[7], &mut nonce);
 
         let confirmed = ledger.advance_with_params(&chain, 0, &confirmation_params);
         if !confirmed.is_empty() {
@@ -183,6 +198,6 @@ fn any_real_skew_in_an_honest_split_still_resolves_via_stage_2() {
     assert_eq!(
         confirmed_leader,
         Some(p1_hash),
-        "stage-2 should confirm the 3-vote majority within 50 rounds of purely honest mining"
+        "stage-2 should confirm the 7-vote majority within 50 rounds of purely honest mining"
     );
 }

@@ -8,6 +8,7 @@ description = "Prism confirmation rules + BuildLedger + Substrate bridge"
 [dependencies]
 parity-scale-codec = { workspace = true, features = ["std"] }
 blake3 = { workspace = true, features = ["std"] }
+log = "0.4"
 argonaut-primitives-prism = { path = "../../primitives/prism" }
 argonaut-prism-chain = { path = "../prism-chain" }
 argonaut-prism-db = { path = "../prism-db" }

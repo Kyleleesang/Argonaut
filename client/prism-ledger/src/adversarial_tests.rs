@@ -222,10 +222,32 @@ fn persistent_balancing_attacker_stalls_stage1_alone_but_not_the_system() {
     // Both halves of this claim are checked explicitly below, against the
     // *same* attack sequence -- stage-1 in isolation stays stuck forever;
     // `advance()` (stage-1 *and* stage-2 together) does not.
-    let (_dir, mut chain, db) = setup(4);
+    //
+    // Sized `m=8` with a 5-3 honest/attacker split, rather than the `m=4`
+    // with a single attacker chain this used before `confirm_unique_leader`
+    // gained eq. (35)'s private-block bound. Both ends of the test constrain
+    // the sizing, and m=4 satisfies neither once that bound is enforced:
+    // - The *final* assertion needs the honest majority to eventually clear
+    //   the private-block bound. At m=4 the 3 honest chains' lower bound tops
+    //   out at `floor(3 - margin) = 2`, exactly the `v_bar_private = 4 - 2` a
+    //   withheld proposer could still reach -- correctly unconfirmable at any
+    //   depth, so this test previously passed only while the bound was
+    //   missing.
+    // - The *first* assertion needs the level to still be unconfirmable while
+    //   the attacker briefly agrees. That rules out a lone dissenter at m=8:
+    //   7 of 8 chains locking in p1 is genuinely decisive, and stage-2 would
+    //   (correctly) confirm before the attack even starts.
+    // 5-3 satisfies both: `lo(p1) = floor(5 - margin) = 4` vs
+    // `v_bar_private = 8 - 4 = 4` while the attacker agrees (no confirmation,
+    // the tie the first assertion wants), and once the attacker commits to p2
+    // its own votes lock in too, lifting `Σ` lower bounds to 6 and dropping
+    // `v_bar_private` to 2 -- which p1's 4 then clears.
+    let (_dir, mut chain, db) = setup(8);
     let genesis = chain.proposer_genesis;
     let mut nonce = 1000u64;
     const K: u64 = 3;
+    /// Voter chains the attacker controls (3 of 8); the rest are honest.
+    const ATTACKER_CHAINS: [ChainId; 3] = [0, 1, 2];
 
     let p1 = proposer_block(1, genesis, vec![], vec![]);
     let p1_hash = block_hash(&p1.header);
@@ -234,13 +256,13 @@ fn persistent_balancing_attacker_stalls_stage1_alone_but_not_the_system() {
     let p2_hash = block_hash(&p2.header);
     chain.insert_block(p2);
 
-    for c in 1..4u16 {
+    for c in 3..8u16 {
         nonce += 1;
         chain.insert_block(voter_block(nonce, c, chain.voter_genesis[c as usize], vec![p1_hash]));
         // Give the honest chains plenty of depth -- irrelevant to stage-1
-        // (chain 0 alone can block its unanimity regardless of how deep the
-        // others are), but exactly what lets stage-2 tell p1's overwhelming,
-        // deeply-rooted support apart from chain 0's shallow, isolated one.
+        // (the attacker's chains alone can block its unanimity regardless of
+        // how deep the others are), but exactly what lets stage-2 tell p1's
+        // deeply-rooted support apart from the attacker's shallow one.
         for _ in 0..(K + 5) {
             let tip = chain.voter_tips[c as usize].0;
             nonce += 1;
@@ -249,35 +271,51 @@ fn persistent_balancing_attacker_stalls_stage1_alone_but_not_the_system() {
     }
 
     let mut ledger = PrismLedger::new(db);
-    // B-12: stage2_enabled is off by default; this test's whole point is
-    // demonstrating stage-2 rescuing the system from stage-1's liveness
-    // weakness, so opt it on explicitly.
-    let confirmation_params =
-        confirmation::ConfirmationParams { stage2_enabled: true, ..Default::default() };
+    // B-15: post-B-15, stage2_enabled is on by default, but the real
+    // (SingleCheck) margin is vacuous at the shallow depths this test runs
+    // at -- pin the pre-B-15 placeholder explicitly so this test still
+    // demonstrates stage-2 rescuing the system from stage-1's liveness
+    // weakness.
+    let confirmation_params = confirmation::ConfirmationParams {
+        stage2_enabled: true,
+        margin: confirmation::MarginPolicy::Custom(confirmation::placeholder_delta_d),
+        ..Default::default()
+    };
 
-    // Chain 0 briefly agrees with the majority (not yet k-deep)...
-    nonce += 1;
-    chain.insert_block(voter_block(nonce, 0, chain.voter_genesis[0], vec![p1_hash]));
+    // The attacker's chains briefly agree with the majority (not yet k-deep)...
+    for c in ATTACKER_CHAINS {
+        nonce += 1;
+        chain.insert_block(voter_block(
+            nonce,
+            c,
+            chain.voter_genesis[c as usize],
+            vec![p1_hash],
+        ));
+    }
     assert_eq!(ledger.advance_with_params(&chain, K, &confirmation_params), vec![]);
 
-    // ...then the attacker reorgs it onto a longer fork voting the minority
-    // block instead (depth 2 > the depth-1 tip it replaces), and simply
-    // keeps extending that same fork from then on -- no more reorgs needed.
-    attacker_fork(&mut chain, 0, 2, vec![p2_hash], &mut nonce);
+    // ...then the attacker reorgs them onto longer forks voting the minority
+    // block instead (depth 2 > the depth-1 tips they replace), and simply
+    // keeps extending those same forks from then on -- no more reorgs needed.
+    for c in ATTACKER_CHAINS {
+        attacker_fork(&mut chain, c, 2, vec![p2_hash], &mut nonce);
+    }
 
     let mut system_confirmed = false;
     for round in 0..20u64 {
-        let tip = chain.voter_tips[0].0;
-        nonce += 1;
-        chain.insert_block(voter_block(nonce, 0, tip, vec![]));
+        for c in ATTACKER_CHAINS {
+            let tip = chain.voter_tips[c as usize].0;
+            nonce += 1;
+            chain.insert_block(voter_block(nonce, c, tip, vec![]));
+        }
 
         // Stage-1 in isolation: must NEVER confirm anything at level 1,
-        // however deep chain 0's dissenting vote gets -- this is the
+        // however deep the attacker's dissenting votes get -- this is the
         // liveness weakness itself, unaffected by stage-2 existing.
         assert_eq!(
             confirmed_leader_at_level(&chain, 1, K),
             None,
-            "round {round}: stage-1 alone must never confirm while chain 0 dissents, no matter its depth"
+            "round {round}: stage-1 alone must never confirm while the attacker dissents, no matter its depth"
         );
 
         // The system as a whole (stage-2 first, stage-1 fallback): should

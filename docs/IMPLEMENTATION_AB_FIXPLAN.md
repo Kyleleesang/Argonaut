@@ -8,8 +8,10 @@
 > through B-16 findings (original review + the 2026-07-10 fresh-eyes audit)
 > are done. The two former ⚠️ design decisions were both decided 2026-07-16:
 > B-11's real fix is spec'd ([`PRISM_RETARGET_SPEC.md`](./PRISM_RETARGET_SPEC.md),
-> implementation deliberately deferred) and B-15 is a Sonnet-ready execute
-> item — see "Open work" below. `docs/IMPLEMENTATION_B_PROGRESS.md` was
+> implementation deliberately deferred) and B-15 is implemented and
+> live-verified (2026-09-30, with B-17 folded in). B-18 (fresh-node backfill
+> from a pruning peer) was found live during that run and is open — see
+> "Open work" below. `docs/IMPLEMENTATION_B_PROGRESS.md` was
 > deleted for the same reason as A's tracker (fully superseded by this doc +
 > git log; its milestone table lived on in `ARGONAUT_ARCHITECTURE_GUIDE.md`
 > §3.9 anyway).
@@ -53,7 +55,38 @@ Read [`IMPLEMENTATION_AB_REVIEW.md`](./IMPLEMENTATION_AB_REVIEW.md) for the *why
 
 The design is written up in [`PRISM_RETARGET_SPEC.md`](./PRISM_RETARGET_SPEC.md) (epoch-based difficulty derived from the canonical confirmed-leader sequence, one-epoch activation lag, MTP timestamp clamping folding in B-14, cumulative-work fork choice, position-bound epoch declaration, rate floor from the shift-14 finding). **Do not implement until a multi-machine testnet exists to soak it** — the user approved this as spec-only; the interim fix (fixed chain-spec difficulty, `retarget_enabled: false`) covers every current deployment. When picking it up, the spec's "hard parts" section is the checklist; every item there is load-bearing.
 
-### B-15 — decided 2026-07-16 (user sign-off): make the derived margin the default; EXECUTE (Sonnet-ready)
+### B-15 — DONE 2026-07-28, live-verified 2026-09-30 (code + `cargo test --workspace` green, 214 tests).
+
+Implemented as specified below, with one **unplanned consensus-safety fix folded in** (found while reviewing the finished B-15 diff, see B-17 immediately after this section — do not read B-15 as landed without it). Summary of what shipped:
+
+- `MarginPolicy` enum replaces the bare `DeltaDFn` in `ConfirmationParams`; `Default` is now `{ k_min: 1, margin: SingleCheck { beta: ASSUMED_ADVERSARY_FRACTION, eps_target: 1e-6 }, stage2_enabled: true }`.
+- `prismBetaPercent`/`prismEpsExponent` added to the chain-spec properties, **and clamped in `node/src/service.rs`** (β to ≤49%, ε exponent to 1..=300) — neither `gamma()` nor the `as i32` cast is safe outside its intended domain, and `prism_params_from_properties` deliberately falls back rather than erroring, so an out-of-range JSON value arrives intact. Out-of-range values log a warning and clamp toward *more* conservative, never less.
+- `--prism-stage2` → `--prism-no-stage2`, threaded as a whole `ConfirmationParams` struct into `run_prism_bridge`. `scripts/docker-entrypoint.sh`'s `PRISM_STAGE2` opt-in became `PRISM_NO_STAGE2` opt-out (the script still passed the removed flag — it was missed by the original step 4).
+- Test triage went as predicted except for the two tests named under B-17.
+
+**Live verification (2026-09-30):** native 3-node run mirroring the compose topology (node1 archive miner, node2 `--prism-prune --prism-k-prune 3` miner, node3 fresh non-miner joined ~6 min later), `--network-backend libp2p`, shift-20 chain spec as in B-10 (the docker image predated B-15, so a native release build was used instead of a 20–40 min image rebuild). To make criterion (c) observable, two log lines were added: `prism: confirmation: stage-2 enabled (beta=25%, eps=1e-6)` at startup (`service.rs`, shows chain-spec β/ε are read) and a per-level `level N confirmed via stage-1|stage-2` debug line in `PrismLedger::advance_with_params`. Result over ~25 min: (a) node1/node2 each confirmed 57 levels, all three nodes on an identical finalized `#57 (0x56e1…223f)`; (b) zero `SortitionMismatch`/panics on any node; (c) stage-2 enabled on every node, fired **0** times, stage-1 fired all 57 on each miner — exactly the expected shallow-depth behavior. Node3's own ledger confirmed nothing — that's a pre-existing B-6 gap unrelated to B-15, see B-18.
+
+### B-17 — `confirm_unique_leader` was missing eq. (35)'s private-block bound (found + fixed 2026-07-28)
+
+`confirm_proposer_list` gates on `best_lower > v_bar_private` where `v_bar_private = m − Σ lower bounds` (eq. 35: the votes a *withheld* proposer could still collect, since it's absent from `proposers_at_level` by construction). `confirm_unique_leader` never computed that term — it compared a candidate only against *visible* rivals, and with a single visible proposer `rivals_max_upper` degenerated to `max().unwrap_or(0)`, so **any** lower bound ≥ 1 "uniquely" confirmed the level.
+
+Why it mattered enough to fix before closing B-15: the bridge imports every confirmed level `finalized: true` with no reorg path, and B-15 is precisely the change that promotes stage-2 from dormant (`stage2_enabled: false` since B-12) into the default finality path. The regime it fires in — few chains voted, votes deep — is the silent-chain backstop case B-15 exists to serve.
+
+Fix: `(lo > rivals_max_upper.max(v_bar_private))`. Regression test: `confirmation/tests.rs`'s `a_unique_leader_is_never_confirmed_while_a_private_proposer_could_still_beat_it`, which pins the load-bearing invariant that the two rules can never disagree about whether a level is confirmable at all.
+
+**Two existing tests were passing *because of* this bug** and were re-sized (user sign-off 2026-07-28), not deleted — each still proves exactly what it was written to prove:
+- `honest_split_tests::any_real_skew_in_an_honest_split_still_resolves_via_stage_2`: m=4/3-1 → m=8/7-1. At m=4 a 3-vote majority's lower bound tops out at `floor(3 − margin) = 2`, exactly `v_bar_private = 4 − 2` — correctly unconfirmable at *any* depth.
+- `adversarial_tests::persistent_balancing_attacker_stalls_stage1_alone_but_not_the_system`: m=4 with 1 attacker chain → m=8 with 3. Both ends of that test constrain the sizing: a lone dissenter at m=8 leaves 7 of 8 chains locking in p1, which is genuinely decisive, so stage-2 would (correctly) confirm *before* the attack starts and the test's first assertion would fail. 5-3 gives `lo(p1)=4` vs `v_bar_private=4` while the attacker feints, then `v_bar_private` drops to 2 once the attacker's own votes lock in — which p1's 4 clears.
+
+### B-18 — a fresh node that backfills from a pruning peer never gets the pruned history, so its own ledger never confirms (found live 2026-09-30, OPEN)
+
+Found during B-15's live run. Node3 (fresh, non-mining) happened to open its first Prism substream with node2 (the `--prism-prune` peer) and backfilled only 324 blocks; node1 had ~1,886 blocks of history at that point, and node3 ended up missing 1,612 of them. Its voter chains are therefore disconnected from genesis, stage-1 unanimity can never hold, and its `PrismLedger` confirmed **zero** levels even after a restart (B-7 recovery moved the cursor to the Substrate best, #33, and it still confirmed nothing through #57). It stayed on the correct finalized tip only because Substrate block sync + `PrismBridgeVerifier` import the other nodes' bridge blocks — its own Prism view never independently confirms anything. The B-10 run's "node3 converged" was very likely this same situation, unnoticed because there was no per-level confirmation log then.
+
+Mechanism (`client/prism-network/src/wire.rs`): `backfill` drops a hash after `MAX_ROUNDS_MISSING` rounds when the peer never delivers it (a pruned peer never will), and never retries it against another peer. The 30s resync in `run` re-seeds only from each peer's *frontier* (`voter_tips`/`unreferenced_*`) filtered by `has_block` — once gossip has delivered the tips, the seed is empty, so the missing deep ancestors are never re-requested from the archive node.
+
+Consequence: harmless while any node's bridge is producing blocks for it to sync, but such a node can never independently verify finality, and if it ever did confirm a level it would build on a best block it didn't derive. Candidate fix (not yet decided): track orphan-pool missing parents and re-request them from *all* peers on the resync tick (not just the peer that failed), and/or have pruning peers advertise their prune frontier so backfill prefers archive peers. Needs a live repro that the fix makes node3 print `confirmed via stage-1`.
+
+### B-15 — decided 2026-07-16 (user sign-off): make the derived margin the default; EXECUTE (Sonnet-ready) — original plan, kept for reference
 
 **Decision:** keep stage-1 (`confirmed_leader_at_level`) unanimous and untouched — it stays the fast path. Flip stage-2 to **on by default with B-3's real margin** (`single_check_margin`), replacing the placeholder in the operational path. β and ε become chain-spec properties.
 

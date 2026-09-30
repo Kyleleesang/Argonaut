@@ -27,17 +27,20 @@ pub struct Cli {
     #[arg(long, default_value_t = 60)]
     pub prism_k_prune: u64,
 
-    /// Enable stage-2 confidence-interval fast confirmation
+    /// Disable stage-2 confidence-interval fast confirmation
     /// (`client/prism-ledger`'s `confirmation::confirm_unique_leader`), which
-    /// otherwise races stage-1's conservative k-deep rule ahead of it. **Off
-    /// by default (B-12):** stage-2's live `delta_d` is a flagged placeholder
-    /// (B-3), not the paper's derived operating point, so with this on, the
-    /// bridge's irreversible finality rests on an unproven confidence margin.
-    /// Exists mainly to measure/compare confirmed-level latency with stage-2
-    /// on vs. off (B-4) -- see `docs/IMPLEMENTATION_AB_FIXPLAN.md`'s B-12
-    /// entry before enabling this on anything but a throwaway devnet.
+    /// otherwise races stage-1's conservative k-deep rule ahead of it and is
+    /// **on by default (B-15)**, using B-3's real derived margin
+    /// (`confirmation::single_check_margin`) at the chain spec's
+    /// `prismBetaPercent`/`prismEpsExponent`. At this repo's default `m=100`,
+    /// that real margin is vacuous below ~400-deep votes, so stage-2 isn't a
+    /// latency win in the common case -- it's a provably-safe backstop for
+    /// stage-1's unanimity weakness (a single censored/offline voter chain
+    /// stalling confirmation forever). Set this flag to fall back to stage-1
+    /// alone, e.g. to isolate stage-1-only latency or reproduce pre-B-15
+    /// behavior -- see `docs/IMPLEMENTATION_AB_FIXPLAN.md`'s B-15 entry.
     #[arg(long)]
-    pub prism_stage2: bool,
+    pub prism_no_stage2: bool,
 }
 
 #[derive(Debug, clap::Subcommand)]
