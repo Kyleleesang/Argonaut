@@ -53,7 +53,6 @@ pub const K_DEEP_CONFIRMATION: u64 = 6;
 /// voted on it yet, or if any chain's vote isn't `k`-deep yet -- callers
 /// should treat all three as "not confirmed yet," not an error.
 pub fn confirmed_leader_at_level(chain: &PrismChain, level: u64, k: u64) -> Option<H256> {
-    let proposer = *chain.level_proposer.get(&level)?;
     let m = chain.params.m_voter_chains as usize;
 
     for chain_idx in 0..m {
@@ -62,20 +61,32 @@ pub fn confirmed_leader_at_level(chain: &PrismChain, level: u64, k: u64) -> Opti
         }
     }
 
-    let info = chain.votes.get(&proposer)?;
-    if info.per_chain.len() != m {
-        return None; // shouldn't happen once every chain has voted, but guard defensively
-    }
-    let all_k_deep = info.per_chain.iter().all(|(&chain_idx, &depth)| {
-        let tip_depth = chain.voter_tips[chain_idx as usize].1;
-        tip_depth.saturating_sub(depth) >= k
-    });
-
-    if all_k_deep {
-        Some(proposer)
-    } else {
-        None
-    }
+    // R-4a: the candidate comes from VOTE STATE only -- the proposer at this
+    // level holding a vote from all m chains, every one >= k deep. It used
+    // to be `chain.level_proposer[level]`, i.e. whichever proposer this node
+    // happened to see first: local, arrival-order-dependent state, so two
+    // honest nodes could run the unanimity check on different proposers.
+    //
+    // More than one proposer can currently satisfy this only because a
+    // voter block may double-vote a level (R-4b); we then pick the lowest
+    // hash, which is at least deterministic across nodes. R-4b's
+    // vote-validity rules (exactly one known proposer per level per voter
+    // block) will make the qualifying proposer unique, and this tie-break
+    // then becomes dead code.
+    chain
+        .proposers_at_level(level)
+        .into_iter()
+        .filter(|proposer| {
+            let Some(info) = chain.votes.get(proposer) else { return false };
+            if info.per_chain.len() != m {
+                return false; // not voted by every chain (also guards defensively)
+            }
+            info.per_chain.iter().all(|(&chain_idx, &depth)| {
+                let tip_depth = chain.voter_tips[chain_idx as usize].1;
+                tip_depth.saturating_sub(depth) >= k
+            })
+        })
+        .min()
 }
 
 /// A newly confirmed leader level, with its BuildLedger delta already computed.
@@ -83,8 +94,7 @@ pub fn confirmed_leader_at_level(chain: &PrismChain, level: u64, k: u64) -> Opti
 pub struct ConfirmedLevel {
     pub level: u64,
     pub leader: H256,
-    /// Txs newly introduced by this level (already deduped against every tx
-    /// emitted by any earlier confirmed level).
+    /// Txs of this level's delta (R-6: deduped within this level only).
     pub txs: Vec<Vec<u8>>,
     /// The leader `PrismBlock`'s own `SuperHeader.timestamp_ms` -- a
     /// deterministic function of the confirmed DAG (baked into the block's
@@ -100,18 +110,16 @@ pub struct ConfirmedLevel {
 
 /// Walks confirmed Prism leader levels forward, one at a time, producing each
 /// level's BuildLedger delta. Owns the "next unconfirmed level" cursor and the
-/// global (cross-level) tx dedup set -- both must survive across calls to
-/// `advance`, since a tx included at level ℓ must never be re-emitted at ℓ+1
-/// even if some later proposer references the same tx block again.
+/// R-6: there is deliberately NO global emitted-tx set any more; dedup is
+/// per level (see `build_ledger_delta_for_leader`).
 pub struct PrismLedger {
     db: Arc<PrismDb>,
     confirmed_tip: u64,
-    emitted_tx_hashes: HashSet<[u8; 32]>,
 }
 
 impl PrismLedger {
     pub fn new(db: Arc<PrismDb>) -> Self {
-        PrismLedger { db, confirmed_tip: 0, emitted_tx_hashes: HashSet::new() }
+        PrismLedger { db, confirmed_tip: 0 }
     }
 
     /// B-7: rebuild a ledger's cursor + tx-dedup state after a restart.
@@ -132,19 +140,16 @@ impl PrismLedger {
     /// Substrate best-block number can never be ahead of reality, so it's the
     /// only race-free anchor.
     ///
-    /// B5 pruning prerequisite: `emitted_tx_hashes` used to be rebuilt by
-    /// re-running `build_ledger_delta_for_leader` (the DFS-over-tx-bodies
-    /// path `advance` itself uses) for every level `1..=confirmed_tip`,
-    /// purely to repopulate the dedup set from tx bodies read back off disk.
-    /// That breaks the moment tx-block bodies become prunable -- a body
-    /// `advance` already consumed and doesn't need again may be gone by the
-    /// time `recover` runs. `EMITTED_TX_HASH` (populated incrementally by
-    /// `build_ledger_delta_for_leader` itself, at the exact moment each tx is
-    /// first emitted) makes the dedup set durable directly, independent of
-    /// whether the bodies that produced it still exist.
+    /// R-6: `recover` no longer reloads any tx-dedup state. The old global
+    /// `EMITTED_TX_HASH` set was persisted BEFORE the Substrate block was
+    /// executed, so (a) a tx that failed execution (nonce n+1 ordered before
+    /// n) was blacklisted forever, and (b) a crash between `advance` and
+    /// import made the restarted node rebuild level N with its txs deduped
+    /// away -- a fork. Now a level's delta is a pure function of the DAG, so
+    /// re-advancing from `confirmed_tip` reproduces it exactly. Replay
+    /// protection is the runtime's job (nonce/era).
     pub fn recover(db: Arc<PrismDb>, confirmed_tip: u64) -> Self {
-        let emitted_tx_hashes = db.iter_emitted_tx_hashes().collect();
-        PrismLedger { db, confirmed_tip, emitted_tx_hashes }
+        PrismLedger { db, confirmed_tip }
     }
 
     /// The last level whose delta has already been returned by `advance`.
@@ -203,17 +208,22 @@ impl PrismLedger {
                 next,
                 if via_stage2 { "stage-2" } else { "stage-1" },
             );
-            let txs = self.build_ledger_delta_for_leader(&leader);
-            // The leader block's own timestamp -- deterministic across every
-            // node that agrees on `leader` (it's part of what's hashed into
-            // the block's identity). See `ConfirmedLevel::timestamp_ms`.
-            let timestamp_ms = self
-                .db
-                .get_block(&leader)
-                .ok()
-                .flatten()
-                .map(|b| b.header.timestamp_ms)
-                .unwrap_or(0);
+            // R-5/R-6: build the COMPLETE delta first; nothing for this
+            // level is persisted unless that succeeds. A missing body (or
+            // leader timestamp) would make this node emit a different delta
+            // than its peers, so we halt instead of advancing.
+            let (txs, timestamp_ms) = match self.build_ledger_delta_for_leader(chain, next, &leader) {
+                Ok(v) => v,
+                Err(why) => {
+                    log::error!(
+                        target: "prism",
+                        "R-5: cannot fully build ledger delta for level {} (leader {:?}): {}; \
+                         not advancing confirmed_tip",
+                        next, leader, why,
+                    );
+                    break;
+                }
+            };
 
             let _ = self.db.put_h256(
                 columns::PROPOSER_LEADER_SEQUENCE,
@@ -234,57 +244,107 @@ impl PrismLedger {
 
     /// BuildLedger for a single confirmed leader (paper Alg. 2): expand the
     /// leader's direct+indirect tx-block refs (DFS over `prop_refs`, tx_refs
-    /// collected in visitation order), dedup by tx hash against every tx ever
-    /// emitted by this `PrismLedger` (not just within this level).
-    fn build_ledger_delta_for_leader(&mut self, leader_hash: &H256) -> Vec<Vec<u8>> {
-        let mut tx_block_hashes = Vec::new();
-        self.expand_proposer_tx_refs(leader_hash, &mut tx_block_hashes, &mut HashSet::new());
+    /// collected in visitation order), dedup by tx hash WITHIN this level
+    /// only (first occurrence wins).
+    ///
+    /// R-6: no cross-level dedup -- the same tx at a later level is emitted
+    /// again and the runtime rejects it by nonce, identically on every node.
+    /// To keep that from re-emitting the entire history every level, the DFS
+    /// does not descend into an earlier level's confirmed leader (its whole
+    /// subtree was already emitted at that level; with pruning its bodies
+    /// may be gone too).
+    ///
+    /// R-5: returns `Err` if any needed body or the leader's timestamp is
+    /// unavailable -- never a partial delta.
+    fn build_ledger_delta_for_leader(
+        &self,
+        chain: &PrismChain,
+        level: u64,
+        leader_hash: &H256,
+    ) -> Result<(Vec<Vec<u8>>, u64), String> {
+        let leader_block = self
+            .db
+            .get_block(leader_hash)
+            .map_err(|e| format!("db error loading leader body: {e:?}"))?
+            .ok_or_else(|| "leader body missing".to_string())?;
+        let timestamp_ms = leader_block.header.timestamp_ms;
 
+        let mut tx_block_hashes = Vec::new();
+        self.expand_proposer_tx_refs(
+            chain,
+            level,
+            leader_hash,
+            true,
+            &mut tx_block_hashes,
+            &mut HashSet::new(),
+        )?;
+
+        let mut seen: HashSet<[u8; 32]> = HashSet::new();
         let mut result = Vec::new();
         for tx_block_hash in &tx_block_hashes {
-            if let Ok(Some(block)) = self.db.get_block(tx_block_hash) {
-                if let BlockContent::Transaction { txs } = block.content {
-                    for tx in txs {
-                        let tx_hash = *blake3::hash(&tx).as_bytes();
-                        if self.emitted_tx_hashes.insert(tx_hash) {
-                            // Best-effort, same discipline as every other
-                            // durable write in this codebase (e.g.
-                            // `PrismChain::persist`): in-memory state stays
-                            // correct either way, this only affects
-                            // restart-recovery (`recover`, below).
-                            let _ = self.db.put_emitted_tx_hash(&tx_hash);
-                            result.push(tx);
-                        }
+            let block = self
+                .db
+                .get_block(tx_block_hash)
+                .map_err(|e| format!("db error loading tx block {tx_block_hash:?}: {e:?}"))?
+                .ok_or_else(|| format!("tx block {tx_block_hash:?} body missing"))?;
+            if let BlockContent::Transaction { txs } = block.content {
+                for tx in txs {
+                    let tx_hash = *blake3::hash(&tx).as_bytes();
+                    if seen.insert(tx_hash) {
+                        result.push(tx);
                     }
                 }
             }
         }
-        result
+        Ok((result, timestamp_ms))
     }
 
     /// DFS over a proposer's `prop_refs`, collecting every reachable
     /// `tx_refs` entry in visitation order. `visited` prevents re-walking a
     /// proposer reachable via multiple paths (the proposer DAG can have
     /// diamonds: two proposers both referencing a common ancestor).
+    /// R-5: a proposer body that fails to load is an `Err`, not a skip.
     fn expand_proposer_tx_refs(
         &self,
+        chain: &PrismChain,
+        level: u64,
         proposer_hash: &H256,
+        is_root: bool,
         tx_block_hashes: &mut Vec<H256>,
         visited: &mut HashSet<H256>,
-    ) {
+    ) -> Result<(), String> {
         if !visited.insert(*proposer_hash) {
-            return;
+            return Ok(());
         }
-        if let Ok(Some(block)) = self.db.get_block(proposer_hash) {
-            if let BlockContent::Proposer { tx_refs, prop_refs } = block.content {
-                for r in &tx_refs {
-                    tx_block_hashes.push(*r);
-                }
-                for r in &prop_refs {
-                    self.expand_proposer_tx_refs(r, tx_block_hashes, visited);
+        // R-6: stop at an earlier level's confirmed leader (see caller doc).
+        if !is_root {
+            if let Some(l) = chain.proposer_level(proposer_hash) {
+                if l < level
+                    && self
+                        .db
+                        .get_h256(columns::PROPOSER_LEADER_SEQUENCE, &l.to_le_bytes())
+                        .ok()
+                        .flatten()
+                        == Some(*proposer_hash)
+                {
+                    return Ok(());
                 }
             }
         }
+        let block = self
+            .db
+            .get_block(proposer_hash)
+            .map_err(|e| format!("db error loading proposer {proposer_hash:?}: {e:?}"))?
+            .ok_or_else(|| format!("proposer {proposer_hash:?} body missing"))?;
+        if let BlockContent::Proposer { tx_refs, prop_refs } = block.content {
+            for r in &tx_refs {
+                tx_block_hashes.push(*r);
+            }
+            for r in &prop_refs {
+                self.expand_proposer_tx_refs(chain, level, r, false, tx_block_hashes, visited)?;
+            }
+        }
+        Ok(())
     }
 }
 

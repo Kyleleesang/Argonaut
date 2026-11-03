@@ -638,9 +638,7 @@ Components (single tokio process):
 > mainnet: genesis/token identity and chain-spec hardening (E0), benchmarked
 > weights and a real fee curve (E1), governance to retire sudo (E2), account
 > utilities (E3), ink! smart contracts (E4), node/ops/release engineering
-> (E5), and the Falcon signing/ecosystem tooling gap (E6). It supersedes
-> `docs/POTENTIAL_PALLET_INTEGRATIONS.md` (the analysis menu) as the
-> committed plan. E is orthogonal to D and respects the same binding rule:
+> (E5), and the Falcon signing/ecosystem tooling gap (E6). E is orthogonal to D and respects the same binding rule:
 > Prism decides order, Substrate decides effect — no session/staking/
 > authorship/finality pallets, ever.
 

@@ -659,6 +659,8 @@ fn prune_drops_confirmed_bodies_but_keeps_meta_queryable() {
     assert!(db.get_block(&prop_hash).unwrap().is_some());
     assert!(db.get_block(&tx_hash).unwrap().is_some());
 
+    // R-5: prune reads the ledger-recorded leader, not `level_proposer`.
+    db.put_h256(argonaut_prism_db::columns::PROPOSER_LEADER_SEQUENCE, &1u64.to_le_bytes(), &prop_hash).unwrap();
     chain.prune(1_000_000, 1); // level 1 is confirmed; no voter chain deep enough to prune
 
     assert!(db.get_block(&prop_hash).unwrap().is_none(), "confirmed proposer body should be dropped");
@@ -699,6 +701,7 @@ fn restart_after_pruning_still_recovers_correctly() {
     }
     let final_tip = tip;
 
+    db.put_h256(argonaut_prism_db::columns::PROPOSER_LEADER_SEQUENCE, &1u64.to_le_bytes(), &prop_hash).unwrap(); // R-5
     chain.prune(10, 1); // prunes deep chain-0 history + prop's now-confirmed body
     let before_votes = chain.vote_totals();
     let before_tip_depth = chain.voter_tips[0].1;
@@ -801,4 +804,75 @@ fn orphan_pool_is_bounded_and_a_retained_orphan_still_resolves() {
         "a retained orphan must still resolve once its parent arrives"
     );
     assert_eq!(chain.voter_tips[0].1, 2, "chain 0's tip must reflect target + the resolved orphan");
+}
+
+/// B-18: `orphan_missing_refs` reports exactly the absent parent of an
+/// orphaned voter block (never the orphan's own hash), and is empty once the
+/// parent arrives and the orphan resolves.
+#[test]
+fn orphan_missing_refs_reports_absent_parent_then_clears_on_resolve() {
+    let mut chain = PrismChain::new(params());
+    assert!(chain.orphan_missing_refs().is_empty());
+
+    let parent = voter_block(1, 0, chain.voter_genesis[0], vec![]);
+    let parent_hash = block_hash(&parent.header);
+    let child = voter_block(2, 0, parent_hash, vec![]);
+    let child_hash = block_hash(&child.header);
+
+    chain.insert_block(child);
+    assert!(chain.orphans.contains_key(&child_hash));
+    assert_eq!(chain.orphan_missing_refs(), vec![parent_hash]);
+
+    chain.insert_block(parent);
+    assert!(!chain.orphans.contains_key(&child_hash));
+    assert!(chain.orphan_missing_refs().is_empty());
+}
+
+/// B-18: two-deep -- orphan A needs P, P arrives but is itself an orphan
+/// needing Q. The result contains Q but not P (P is an orphan, so `has_block`).
+#[test]
+fn orphan_missing_refs_reports_only_the_deepest_absent_ancestor() {
+    let mut chain = PrismChain::new(params());
+
+    let q = voter_block(1, 0, chain.voter_genesis[0], vec![]);
+    let q_hash = block_hash(&q.header);
+    let p = voter_block(2, 0, q_hash, vec![]);
+    let p_hash = block_hash(&p.header);
+    let a = voter_block(3, 0, p_hash, vec![]);
+
+    chain.insert_block(a);
+    assert_eq!(chain.orphan_missing_refs(), vec![p_hash]);
+
+    chain.insert_block(p);
+    let missing = chain.orphan_missing_refs();
+    assert_eq!(missing, vec![q_hash], "must contain Q only, not orphaned P");
+
+    chain.insert_block(q);
+    assert!(chain.orphan_missing_refs().is_empty());
+}
+
+/// R-5: a confirmed level with no recorded leader is NOT pruned (never
+/// guessed from the first-seen `level_proposer`), and a recorded leader that
+/// differs from the first-seen proposer is the one swept.
+#[test]
+fn prune_uses_recorded_leader_and_skips_levels_without_one() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let db = std::sync::Arc::new(PrismDb::open(dir.path()).expect("open PrismDb"));
+    let mut chain = PrismChain::with_db(params(), db.clone());
+    let genesis = chain.proposer_genesis;
+    let first_seen = proposer_block(1, genesis, vec![], vec![]);
+    let first_seen_hash = block_hash(&first_seen.header);
+    chain.insert_block(first_seen);
+    let real_leader = proposer_block(2, genesis, vec![], vec![]);
+    let real_leader_hash = block_hash(&real_leader.header);
+    chain.insert_block(real_leader);
+
+    chain.prune(1_000_000, 1); // no leader recorded -> nothing pruned
+    assert!(db.get_block(&first_seen_hash).unwrap().is_some());
+    assert!(db.get_block(&real_leader_hash).unwrap().is_some());
+
+    db.put_h256(argonaut_prism_db::columns::PROPOSER_LEADER_SEQUENCE, &1u64.to_le_bytes(), &real_leader_hash).unwrap();
+    chain.prune(1_000_000, 1);
+    assert!(db.get_block(&real_leader_hash).unwrap().is_none());
+    assert!(db.get_block(&first_seen_hash).unwrap().is_some(), "first-seen non-leader must be kept");
 }

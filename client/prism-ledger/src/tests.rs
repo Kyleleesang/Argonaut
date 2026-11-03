@@ -141,7 +141,7 @@ fn advance_is_idempotent_once_no_new_level_is_confirmable() {
 }
 
 #[test]
-fn build_ledger_delta_follows_indirect_refs_and_dedups_across_levels() {
+fn build_ledger_delta_follows_indirect_refs_and_does_not_dedup_across_levels() {
     let (_dir, mut chain, db) = setup();
     let genesis = chain.proposer_genesis;
 
@@ -172,8 +172,10 @@ fn build_ledger_delta_follows_indirect_refs_and_dedups_across_levels() {
     assert_eq!(second.len(), 1);
     assert_eq!(second[0].level, 2);
     assert_eq!(second[0].leader, p2_hash);
-    // [1] deduped away (already emitted at level 1); only [3] is genuinely new.
-    assert_eq!(second[0].txs, vec![vec![3]]);
+    // R-6: no cross-level dedup. [1] (repeated by t3) IS emitted again at
+    // level 2 (the runtime rejects it by nonce); p1's already-settled subtree
+    // (t1 = [1],[2]) is not re-walked, since p1 is level 1's confirmed leader.
+    assert_eq!(second[0].txs, vec![vec![1], vec![3]]);
 }
 
 #[test]
@@ -319,7 +321,7 @@ fn recover_does_not_rewind_the_confirmed_cursor() {
 }
 
 #[test]
-fn recover_carries_over_cross_level_tx_dedup_state() {
+fn recover_does_not_carry_cross_level_tx_dedup_state() {
     let (_dir, mut chain, db) = setup();
     let genesis = chain.proposer_genesis;
 
@@ -343,7 +345,7 @@ fn recover_carries_over_cross_level_tx_dedup_state() {
     let confirmed = ledger.advance(&chain, 0);
     assert_eq!(confirmed.len(), 2, "p1 and p2 both become confirmable in the same `advance` call");
     assert_eq!(ledger.confirmed_tip(), 2);
-    drop(ledger); // "restart": this ledger's in-memory `emitted_tx_hashes` is gone
+    drop(ledger); // "restart": this ledger's in-memory state is gone
 
     let mut recovered = PrismLedger::recover(db, 2); // 2 confirmed levels so far -> chain height 2
     assert_eq!(recovered.confirmed_tip(), 2);
@@ -361,7 +363,78 @@ fn recover_carries_over_cross_level_tx_dedup_state() {
     assert_eq!(third.len(), 1);
     assert_eq!(third[0].level, 3);
     assert_eq!(third[0].leader, p3_hash);
-    // [1] must be deduped away by the *recovered* dedup state, not re-emitted
-    // just because `recovered`'s own in-memory `emitted_tx_hashes` started empty.
-    assert_eq!(third[0].txs, vec![vec![3]]);
+    // R-6: no persisted dedup -- [1] is emitted again (runtime rejects by nonce).
+    assert_eq!(third[0].txs, vec![vec![1], vec![3]]);
+}
+
+// R-6: a crash between `advance` and the Substrate import must not change
+// what level `tip` contains when it is re-confirmed after restart.
+#[test]
+fn recover_after_crash_reemits_the_uncommitted_level_with_identical_txs() {
+    let (_dir, mut chain, db) = setup();
+    let genesis = chain.proposer_genesis;
+    let t1 = tx_block(1, genesis, vec![vec![1]]);
+    let t1_hash = block_hash(&t1.header);
+    chain.insert_block(t1);
+    let p1 = proposer_block(2, genesis, vec![t1_hash], vec![]);
+    let p1_hash = block_hash(&p1.header);
+    chain.insert_block(p1);
+    vote_from_every_chain(&mut chain, 100, p1_hash);
+    let t2 = tx_block(3, p1_hash, vec![vec![2], vec![3]]);
+    let t2_hash = block_hash(&t2.header);
+    chain.insert_block(t2);
+    let p2 = proposer_block(4, p1_hash, vec![t2_hash], vec![p1_hash]);
+    let p2_hash = block_hash(&p2.header);
+    chain.insert_block(p2);
+    vote_from_every_chain(&mut chain, 200, p2_hash);
+
+    let mut ledger = PrismLedger::new(db.clone());
+    let first_run = ledger.advance(&chain, 0);
+    assert_eq!(first_run.len(), 2);
+    let level2 = first_run[1].clone();
+    drop(ledger); // crash: level 2 was built but its block never imported
+
+    let mut recovered = PrismLedger::recover(db, 1); // best_number = 1
+    let again = recovered.advance(&chain, 0);
+    assert_eq!(again, vec![level2.clone()]);
+    assert_eq!(level2.txs, vec![vec![2], vec![3]]);
+}
+
+#[test]
+fn same_tx_within_one_level_is_emitted_once() {
+    let (_dir, mut chain, db) = setup();
+    let genesis = chain.proposer_genesis;
+    let t1 = tx_block(1, genesis, vec![vec![7], vec![8]]);
+    let t1_hash = block_hash(&t1.header);
+    chain.insert_block(t1);
+    let t2 = tx_block(2, genesis, vec![vec![7], vec![9]]);
+    let t2_hash = block_hash(&t2.header);
+    chain.insert_block(t2);
+    let p1 = proposer_block(3, genesis, vec![t1_hash, t2_hash], vec![]);
+    let p1_hash = block_hash(&p1.header);
+    chain.insert_block(p1);
+    vote_from_every_chain(&mut chain, 100, p1_hash);
+    let mut ledger = PrismLedger::new(db);
+    let out = ledger.advance(&chain, 0);
+    assert_eq!(out[0].txs, vec![vec![7], vec![8], vec![9]]);
+}
+
+// R-5: a missing tx-block body halts the ledger without advancing or
+// persisting anything for that level.
+#[test]
+fn advance_halts_when_a_needed_body_is_missing() {
+    let (_dir, mut chain, db) = setup();
+    let genesis = chain.proposer_genesis;
+    let t1 = tx_block(1, genesis, vec![vec![1]]);
+    let t1_hash = block_hash(&t1.header);
+    chain.insert_block(t1);
+    let p1 = proposer_block(2, genesis, vec![t1_hash], vec![]);
+    let p1_hash = block_hash(&p1.header);
+    chain.insert_block(p1);
+    vote_from_every_chain(&mut chain, 100, p1_hash);
+    db.delete_block_body(&t1_hash).unwrap();
+    let mut ledger = PrismLedger::new(db.clone());
+    assert_eq!(ledger.advance(&chain, 0), vec![]);
+    assert_eq!(ledger.confirmed_tip(), 0);
+    assert_eq!(db.get_h256(columns::PROPOSER_LEADER_SEQUENCE, &1u64.to_le_bytes()).unwrap(), None);
 }

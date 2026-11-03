@@ -1,6 +1,6 @@
 # Argonaut Frontend — Full-Feature dApp on the Three.js Solar System
 
-**Status: plan / documentation (2026-07-13), no code.** This is the
+**Status: F0/F1 done** (`wallet/signer-core` + `wallet/signer-wasm`, node CLI rewired as thin shells; commit `3f9e8fa`). **F2 onward not started.** This is the
 implementation guide for turning the solar-system WebGL experience
 (`web/`, spec: `FRONTEND_SOLARSYSTEM_SPEC.md`) into a **functional Substrate
 frontend** that exposes every feature of the Argonaut chain — accounts and

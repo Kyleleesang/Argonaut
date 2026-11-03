@@ -7,8 +7,7 @@ design (≥ hours, adversarial timing). Nothing currently deployed needs
 retargeting: B-16 made fixed difficulty a chain-spec parameter
 (`prismDifficultyShift`), which covers every single-box and LAN devnet.
 
-Read `docs/IMPLEMENTATION_AB_REVIEW.md` B-11 and the fixplan's B-11 entry for
-the root cause this fixes: the old retarget mutated `params.difficulty` in
+Root cause this fixes (B-11): the old retarget mutated `params.difficulty` in
 **local block-acceptance order**, which is not consensus, so two honest nodes
 could disagree on the current difficulty around a retarget boundary and
 permanently split on `SortitionMismatch`.

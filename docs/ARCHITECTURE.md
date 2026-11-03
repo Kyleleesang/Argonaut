@@ -531,11 +531,12 @@ Two independent confirmation rules, layered:
 
  STAGE 2 — §4.5 confidence-interval fast confirmation (paper Def. 4.5)
     a probabilistic rule that can confirm a *uniquely determined* leader well before
-    every chain has voted -- see confirmation.rs. Its numeric safety margin (δ_d) is a
-    faithful port of the paper's Appendix E.1 math, but NOT wired in as the default: the
-    paper's literal k_min is thousands of blocks deep for any sane security parameter (an
-    asymptotic-proof artifact), which would make stage 2 slower than stage 1 if used as-is.
-    A practical placeholder margin is used instead until a usable operating point is derived.
+    every chain has voted -- see confirmation.rs. On by default (B-15; --prism-no-stage2
+    opts out). Its margin is single_check_margin, re-derived from the paper's own Chernoff
+    bound for a single check at the chain spec's prismBetaPercent / prismEpsExponent (the
+    paper's literal Appendix E.1 k_min is thousands of blocks deep -- an asymptotic-proof
+    artifact). At m=100 that margin is vacuous below ~400-deep votes, so stage 2 is a
+    safety backstop for a stalled (silent-chain) stage 1, not a latency win.
 
  PrismLedger::advance() tries stage 2 first, falls back to stage 1 -- whichever fires
  first in real time is what confirms the level. Stage 2 is provably never LESS safe
@@ -745,10 +746,12 @@ Tying the whole machine together, from a signed transaction to a settled balance
 These are documented in code comments in full detail; summarized here so this document doesn't
 read as more finished than it is:
 
-- **Stage 2's confidence margin (`δ_d`)** is a practical placeholder, not the paper's literal
-  Appendix E.1 constant — that constant is thousands of blocks deep for any sane security
-  parameter (an asymptotic-proof artifact) and would make stage 2 *slower* than stage 1 if used
-  as-is. The faithful port exists (`paper_k_min`/`paper_delta_d`) but isn't the default.
+- **Stage 2 is a backstop, not a fast path, at `m = 100`.** Its margin (`single_check_margin`,
+  B-3/B-15) is derived rather than a placeholder, but it is vacuous below ~400-deep votes. So
+  in practice stage 1 confirms everything, and stage 2 only rescues a level that stage 1's
+  unanimity would stall on forever (a silent voter chain). Faster stage 2 needs a larger `m` or
+  a smaller assumed β. The bridge finalizes with no reorg path, so anything holding real value
+  should set `prismEpsExponent` ≥ 9.
 - **Two honest miners can, in the exact-tie case, stall stage-1 confirmation forever** — proven
   structural (not a numerical shortfall) at small `m`; vanishingly unlikely at the paper's
   intended `m` (100+). Don't scale `m` down to ~4 expecting fast guaranteed confirmation.

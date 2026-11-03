@@ -1,13 +1,19 @@
 //! B3: the Substrate bridge (architecture guide §3.8). Prism runs entirely
 //! client-side; this is the only place a confirmed Prism leader level ever
-//! turns into a Substrate block. The bridge chain never reorgs -- every block
-//! is imported `finalized: true` with `fork_choice: Custom(true)` ("always
-//! best"), since Prism's own confirmation rule
-//! (`PrismChain::confirmed_leader_at_level`) is the actual consensus;
-//! Substrate's fork-choice here is just bookkeeping over an already-decided
-//! sequence. This replaces the throwaway B0 PoW chain (`node/src/pow.rs`,
-//! now deleted) entirely -- there is no more client-side PoW mining loop
-//! driving the Substrate chain, only this bridge.
+//! turns into a *best/finalized* Substrate block. The bridge chain never
+//! reorgs -- every block the bridge itself derives is imported
+//! `finalized: true` with `fork_choice: Custom(true)` ("always best"), since
+//! Prism's own confirmation rule (`PrismChain::confirmed_leader_at_level`) is
+//! the actual consensus; Substrate's fork-choice here is just bookkeeping over
+//! an already-decided sequence. This replaces the throwaway B0 PoW chain
+//! (`node/src/pow.rs`, now deleted) entirely -- there is no more client-side
+//! PoW mining loop driving the Substrate chain, only this bridge.
+//!
+//! R-1/R-2/R-6: best and finalized move *only* via this bridge. Blocks that
+//! arrive over Substrate sync are cached as non-best, non-final side blocks
+//! (see [`PrismBridgeVerifier`]) and are promoted only when the local Prism
+//! ledger confirms the same level. A node therefore follows the chain only by
+//! running Prism; there is no trusted "follow via Substrate sync" mode.
 use crate::service::FullClient;
 use argonaut_prism_chain::PrismChain;
 use argonaut_prism_db::PrismDb;
@@ -16,16 +22,16 @@ use argonaut_primitives_prism::H256;
 use argonaut_runtime::opaque::{Block, UncheckedExtrinsic};
 use parity_scale_codec::{Decode, Encode};
 use sc_block_builder::BlockBuilderBuilder;
-use sc_client_api::StorageProvider;
+use sc_client_api::{Finalizer, StorageProvider};
 use sc_consensus::{
     import_queue::Verifier, BlockImport, BlockImportParams, ForkChoiceStrategy, ImportResult,
     StateAction, StorageChanges,
 };
-use sp_blockchain::HeaderBackend;
+use sp_blockchain::{BlockStatus, HeaderBackend};
 use sp_consensus::BlockOrigin;
 use sp_inherents::InherentDataProvider as _;
 use sp_runtime::generic::DigestItem;
-use sp_runtime::traits::Block as BlockT;
+use sp_runtime::traits::{Block as BlockT, Header as HeaderT, SaturatedConversion};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -95,16 +101,60 @@ fn leader_digest_item(level: u64, leader: H256) -> DigestItem {
     DigestItem::PreRuntime(*LEADER_DIGEST_ENGINE_ID, LeaderDigest { level, leader }.encode())
 }
 
+/// Decodes the single `LeaderDigest` a bridge block must carry. Requires
+/// *exactly one* `PreRuntime` item under [`LEADER_DIGEST_ENGINE_ID`] that
+/// SCALE-decodes cleanly (and consumes every byte); anything else -- zero
+/// items, duplicates, trailing garbage -- is `None`. Shared by the network
+/// verifier (R-1) and the bridge's own parent/existing-block checks (R-2) so
+/// both apply the same definition of "well-formed".
+fn leader_digest_of(header: &<Block as BlockT>::Header) -> Option<LeaderDigest> {
+    let mut found: Option<LeaderDigest> = None;
+    for item in header.digest().logs() {
+        if let DigestItem::PreRuntime(id, data) = item {
+            if id == LEADER_DIGEST_ENGINE_ID {
+                if found.is_some() {
+                    return None;
+                }
+                let mut input = &data[..];
+                let d = LeaderDigest::decode(&mut input).ok()?;
+                if !input.is_empty() {
+                    return None;
+                }
+                found = Some(d);
+            }
+        }
+    }
+    found
+}
+
 /// Verifier for blocks arriving over the network (self-authored blocks are
 /// imported directly by [`run_prism_bridge`], bypassing the import queue
-/// entirely). Since the bridge chain is a deterministic function of the
-/// confirmed Prism DAG and never reorgs, every block that reaches this
-/// verifier via normal Substrate block sync is treated the same way a
-/// self-authored one is: finalized immediately, always the new best block.
-/// The actual safety check is the default `StateAction::Execute` left in
-/// place by `BlockImportParams::new` -- the client re-executes the block's
-/// extrinsics against the runtime and rejects it on a state-root/extrinsics-
-/// root mismatch, the same as any other Substrate block import.
+/// entirely).
+///
+/// R-1: a network block must NEVER become best or finalized on its own. The
+/// old verifier marked every network block `finalized` + "always best";
+/// re-execution (the default `StateAction::Execute`) proves only that the
+/// block is a *valid state transition*, not that it is the *Prism-ordered*
+/// one, so any peer could author arbitrary extrinsics and have victims adopt
+/// them as the canonical chain (and, after a restart, adopt the fake height
+/// as the ledger cursor). Now:
+///
+/// 1. The header must carry exactly one well-formed `prsm` `LeaderDigest`
+///    whose `level == header.number` (genesis never comes through the queue,
+///    and the bridge's invariant is block number == Prism level). Otherwise
+///    `Err`, which makes the import queue penalize the peer -- correct for a
+///    malformed block.
+/// 2. Otherwise the block is imported as a non-best, non-final side block
+///    (`finalized = false`, `Custom(false)`). Honest peers' blocks are just a
+///    cache: construction is deterministic, so when the local ledger confirms
+///    that level [`run_prism_bridge`] derives the identical hash and promotes
+///    the cached block to best+final. A malicious block becomes a dead side
+///    fork that Substrate discards as soon as a sibling at that height is
+///    finalized.
+///
+/// Consequence: a node follows the chain only by running Prism. There is no
+/// trusted "follow via Substrate sync" mode (any such mode would have to be
+/// an explicit, documented opt-in).
 pub struct PrismBridgeVerifier;
 
 #[async_trait::async_trait]
@@ -113,9 +163,85 @@ impl Verifier<Block> for PrismBridgeVerifier {
         &self,
         mut block: BlockImportParams<Block>,
     ) -> Result<BlockImportParams<Block>, String> {
-        block.finalized = true;
-        block.fork_choice = Some(ForkChoiceStrategy::Custom(true));
+        let number: u64 = (*block.header.number()).into();
+        let digest = leader_digest_of(&block.header).ok_or_else(|| {
+            format!(
+                "block #{number} lacks exactly one well-formed `prsm` LeaderDigest pre-runtime item"
+            )
+        })?;
+        if digest.level != number {
+            return Err(format!(
+                "block #{number} carries LeaderDigest level {} (must equal its number)",
+                digest.level
+            ));
+        }
+        block.finalized = false;
+        block.fork_choice = Some(ForkChoiceStrategy::Custom(false));
         Ok(block)
+    }
+}
+
+/// What the bridge should do for a confirmed level (R-2). Pure so it can be
+/// unit-tested without a client.
+#[derive(Debug, PartialEq, Eq)]
+pub enum BuildDecision {
+    /// Derive and import the block for this level.
+    Build,
+    /// A canonical block for this level with the right leader already exists.
+    AlreadyDone,
+    /// Stop the bridge: something is inconsistent and building would fork.
+    Halt(String),
+}
+
+/// R-2: decide whether to build level `level`.
+///
+/// * `parent_digest_level`: the `LeaderDigest` level of the canonical block at
+///   height `level - 1`; `None` if that block is missing or its digest is
+///   malformed. For `level - 1 == 0` the caller passes `Some(0)` when genesis
+///   exists (genesis carries no digest by construction).
+/// * `existing_at_level`: `None` if no canonical block exists at height
+///   `level`; `Some(None)` if one exists but has no valid digest;
+///   `Some(Some(leader))` otherwise.
+/// * `expected_leader`: the leader Prism confirmed for `level`.
+///
+/// Target height is `level`, parent is the canonical block at `level - 1`
+/// (never `best_hash`). After R-1 a canonical block at `level` can only have
+/// come from our own bridge, so a mismatch there is a real bug and we must
+/// halt rather than build over it.
+pub fn decide_build(
+    level: u64,
+    parent_digest_level: Option<u64>,
+    existing_at_level: Option<Option<H256>>,
+    expected_leader: H256,
+) -> BuildDecision {
+    if level == 0 {
+        return BuildDecision::Halt("level 0 is genesis and is never built".into());
+    }
+    match parent_digest_level {
+        None => {
+            return BuildDecision::Halt(format!(
+                "canonical parent at #{} is missing or has no valid LeaderDigest",
+                level - 1
+            ))
+        },
+        Some(l) if l != level - 1 => {
+            return BuildDecision::Halt(format!(
+                "canonical parent at #{} carries LeaderDigest level {l}, expected {}",
+                level - 1,
+                level - 1
+            ))
+        },
+        Some(_) => {},
+    }
+    match existing_at_level {
+        None => BuildDecision::Build,
+        Some(Some(leader)) if leader == expected_leader => BuildDecision::AlreadyDone,
+        Some(Some(leader)) => BuildDecision::Halt(format!(
+            "canonical block #{level} already exists with leader {leader:?}, but Prism confirmed {expected_leader:?}"
+        )),
+        Some(None) => BuildDecision::Halt(format!(
+            "canonical block #{level} already exists without a valid LeaderDigest"
+        )),
     }
 }
 
@@ -178,6 +304,16 @@ pub async fn run_prism_bridge(
 
         for level in confirmed {
             let level_no = level.level;
+            // R-6: never advance past a level whose import failed. `ledger`
+            // has already moved its cursor past this level inside
+            // `advance_with_params`, so carrying on after a failure would
+            // leave the Substrate height drifting from the Prism level
+            // forever. Stop the task instead (it is spawned as an essential
+            // task, so the node shuts down loudly); on restart
+            // `PrismLedger::recover(best_number)` re-derives from Substrate's
+            // best, which is correct because best only ever moves via this
+            // bridge (R-1) and the ledger no longer persists a global
+            // emitted-tx set.
             if let Err(err) = build_and_import_block(
                 &client,
                 &block_import,
@@ -190,8 +326,9 @@ pub async fn run_prism_bridge(
             {
                 log::error!(
                     target: "prism-bridge",
-                    "failed to build/import block for confirmed leader level {level_no}: {err}"
+                    "R-6: halting the bridge at confirmed leader level {level_no}: {err}"
                 );
+                return;
             }
         }
 
@@ -210,9 +347,31 @@ async fn build_and_import_block(
     txs: Vec<Vec<u8>>,
     leader_timestamp_ms: u64,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let info = client.info();
-    let parent_hash = info.best_hash;
-    let parent_number = info.best_number;
+    // R-2: parent is the canonical block at `level - 1`, never `best_hash`.
+    // (Best only moves via this bridge after R-1, but "block number == Prism
+    // level" is the invariant everything else relies on, so enforce it
+    // explicitly instead of assuming it.) `HeaderBackend::hash(n)` resolves
+    // the *canonical* block at height n, so side blocks cached from the
+    // network (R-1) are invisible here.
+    let parent_number: <<Block as BlockT>::Header as HeaderT>::Number =
+        level.saturating_sub(1).saturated_into();
+    let parent_hash = client.hash(parent_number)?;
+    let parent_digest_level = match parent_hash {
+        None => None,
+        Some(h) if level == 1 => client.header(h)?.map(|_| 0),
+        Some(h) => client.header(h)?.and_then(|hd| leader_digest_of(&hd)).map(|d| d.level),
+    };
+    let level_number: <<Block as BlockT>::Header as HeaderT>::Number = level.saturated_into();
+    let existing_at_level = match client.hash(level_number)? {
+        None => None,
+        Some(h) => Some(client.header(h)?.and_then(|hd| leader_digest_of(&hd)).map(|d| d.leader)),
+    };
+    match decide_build(level, parent_digest_level, existing_at_level, leader) {
+        BuildDecision::Build => {},
+        BuildDecision::AlreadyDone => return Ok(()),
+        BuildDecision::Halt(reason) => return Err(reason.into()),
+    }
+    let parent_hash = parent_hash.expect("decide_build returned Build, so the parent exists");
 
     let mut builder = BlockBuilderBuilder::new(&**client)
         .on_parent_block(parent_hash)
@@ -256,12 +415,34 @@ async fn build_and_import_block(
         // content, so a malicious/buggy peer's tx block could contain
         // garbage), or the extrinsic decodes fine but fails application (bad
         // nonce, a double-spend that survived structural dedup, etc).
+        //
+        // R-6: skipping is CORRECT and must stay. Replay protection is the
+        // runtime's job (nonce + era), not the ledger's: a repeated, stale or
+        // out-of-order extrinsic fails `push` identically on every node, so
+        // every node derives the same block. (The ledger no longer keeps a
+        // global "already emitted" set; marking a tx emitted before it
+        // executed was what used to strand accounts and fork a restarted node.)
         let Ok(xt) = UncheckedExtrinsic::from_bytes(&tx) else { continue };
         let _ = builder.push(xt);
     }
 
     let built = builder.build()?;
     let (header, body) = built.block.deconstruct();
+
+    // R-1: an honest peer's block for this level may already be cached as a
+    // non-best side block. Construction is deterministic, so it has the same
+    // hash as ours; a plain import would return `AlreadyInChain` and change
+    // nothing. `import_existing = true` does NOT fix that here: the client
+    // would re-apply our `StorageChanges` and `sc_state_db` rejects
+    // re-inserting a not-yet-canonical block (`BlockAlreadyExists`,
+    // state-db/src/noncanonical.rs:307). So promote the cached block with
+    // `finalize_block` instead, which finalizes it and (since it is not an
+    // ancestor of best) moves the head onto it (client.rs:939-959).
+    let hash = header.hash();
+    if client.status(hash)? == BlockStatus::InChain {
+        client.finalize_block(hash, None, true)?;
+        return Ok(());
+    }
 
     let mut params = BlockImportParams::new(BlockOrigin::Own, header);
     params.body = Some(body);
@@ -414,5 +595,62 @@ mod tests {
                 a.level
             );
         }
+    }
+
+    #[test]
+    fn decide_build_cases() {
+        let l = H256::repeat_byte(1);
+        let other = H256::repeat_byte(2);
+        // Normal: parent digest is level-1, nothing at `level`.
+        assert_eq!(decide_build(5, Some(4), None, l), BuildDecision::Build);
+        // Level 1 on genesis (caller passes Some(0)).
+        assert_eq!(decide_build(1, Some(0), None, l), BuildDecision::Build);
+        // Missing/malformed parent.
+        assert!(matches!(decide_build(5, None, None, l), BuildDecision::Halt(_)));
+        // Parent digest level wrong.
+        assert!(matches!(decide_build(5, Some(3), None, l), BuildDecision::Halt(_)));
+        assert!(matches!(decide_build(5, Some(5), None, l), BuildDecision::Halt(_)));
+        // Existing canonical block with the same leader: nothing to do.
+        assert_eq!(decide_build(5, Some(4), Some(Some(l)), l), BuildDecision::AlreadyDone);
+        // Existing with a different leader / malformed digest: halt, never build over it.
+        assert!(matches!(decide_build(5, Some(4), Some(Some(other)), l), BuildDecision::Halt(_)));
+        assert!(matches!(decide_build(5, Some(4), Some(None), l), BuildDecision::Halt(_)));
+        // Level 0 is never built.
+        assert!(matches!(decide_build(0, Some(0), None, l), BuildDecision::Halt(_)));
+        // Parent problems take precedence over an existing block.
+        assert!(matches!(decide_build(5, None, Some(Some(l)), l), BuildDecision::Halt(_)));
+    }
+
+    #[test]
+    fn leader_digest_of_requires_exactly_one_well_formed_item() {
+        use sp_runtime::generic::Digest;
+        type H = <Block as BlockT>::Header;
+        let mk = |logs: Vec<DigestItem>| -> H {
+            H::new(
+                7u32.into(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Digest { logs },
+            )
+        };
+        let l = H256::repeat_byte(9);
+        let good = leader_digest_item(7, l);
+        let d = leader_digest_of(&mk(vec![good.clone()])).expect("well-formed");
+        assert_eq!((d.level, d.leader), (7, l));
+        // none
+        assert!(leader_digest_of(&mk(vec![])).is_none());
+        // duplicated
+        assert!(leader_digest_of(&mk(vec![good.clone(), good.clone()])).is_none());
+        // wrong engine id is ignored (-> none)
+        assert!(leader_digest_of(&mk(vec![DigestItem::PreRuntime(*b"xxxx", vec![0; 40])])).is_none());
+        // `Other` item with our payload does not count
+        assert!(leader_digest_of(&mk(vec![DigestItem::Other(LeaderDigest { level: 7, leader: l }.encode())])).is_none());
+        // trailing garbage
+        let mut bytes = LeaderDigest { level: 7, leader: l }.encode();
+        bytes.push(0);
+        assert!(leader_digest_of(&mk(vec![DigestItem::PreRuntime(*LEADER_DIGEST_ENGINE_ID, bytes)])).is_none());
+        // truncated
+        assert!(leader_digest_of(&mk(vec![DigestItem::PreRuntime(*LEADER_DIGEST_ENGINE_ID, vec![1, 2, 3])])).is_none());
     }
 }

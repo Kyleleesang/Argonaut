@@ -345,6 +345,45 @@ pub fn merkle_proof(leaves: &[H256], index: usize) -> MerkleProof {
     MerkleProof(proof)
 }
 
+/// R-3: the direction bits a proof for slot `index` MUST carry in a tree of
+/// `leaf_count` leaves, built exactly as `merkle_root`/`merkle_proof` build it
+/// (odd-width levels duplicate their last node, so a proof's length is
+/// `ceil(log2(leaf_count))`, and an even index at the last, unpaired position
+/// still gets `sibling_is_right = true` with the sibling being itself).
+///
+/// `verify_merkle_proof` alone only shows the leaf is *somewhere* in a tree
+/// with that root; the header commits to the root but not to which slot the
+/// leaf occupies, so one PoW could carry many alternative bodies. Comparing a
+/// proof's bits to this sequence pins the leaf to exactly one index of exactly
+/// one tree shape (the path bits are the binary digits of the index, LSB
+/// first). Returns `None` when `index >= leaf_count`. The length of the result
+/// is the required proof length (empty for a single-leaf tree).
+pub fn expected_proof_directions(leaf_count: usize, index: usize) -> Option<Vec<bool>> {
+    if index >= leaf_count {
+        return None;
+    }
+    let mut bits = Vec::new();
+    let mut width = leaf_count;
+    let mut idx = index;
+    while width > 1 {
+        bits.push(idx % 2 == 0);
+        width = (width + 1) / 2;
+        idx /= 2;
+    }
+    Some(bits)
+}
+
+/// R-3: does `proof` have exactly the shape (length and direction bits) of a
+/// proof for `index` in a `leaf_count`-leaf tree?
+fn proof_binds_index(proof: &MerkleProof, leaf_count: usize, index: usize) -> bool {
+    match expected_proof_directions(leaf_count, index) {
+        Some(bits) => {
+            proof.0.len() == bits.len() && proof.0.iter().map(|(_, r)| *r).eq(bits.into_iter())
+        }
+        None => false,
+    }
+}
+
 /// Verify a Merkle proof: does this path from `leaf` match `root`?
 pub fn verify_merkle_proof(root: &H256, leaf: &H256, proof: &MerkleProof) -> bool {
     let mut current = *leaf;
@@ -371,6 +410,14 @@ pub enum ValidationError {
     InvalidParentProof,
     /// The content Merkle proof does not verify under content_root.
     InvalidContentProof,
+    /// R-3: the parent proof verifies, but its length/direction bits are not
+    /// those of this block's sortitioned slot in an (m+2)-leaf tree.
+    ParentProofWrongIndex,
+    /// R-3: the content proof verifies, but its length/direction bits are not
+    /// those of this block's sortitioned slot in an (m+2)-leaf tree.
+    ContentProofWrongIndex,
+    /// R-3: voter block's `parent` differs from its content's `voter_parent`.
+    VoterParentMismatch,
     /// Voter block votes are not strictly ascending.
     VotesNotAscending,
     /// Transaction block exceeds B_t size limit.
@@ -405,9 +452,16 @@ pub fn validate_block(block: &PrismBlock, params: &Params) -> Result<Validated, 
 
     // Content-specific sanity checks
     match &block.content {
-        BlockContent::Voter { chain, votes, .. } => {
+        BlockContent::Voter { chain, votes, voter_parent } => {
             if *chain >= params.m_voter_chains {
                 return Err(ValidationError::InvalidChainId);
+            }
+            // R-3: a voter block's two notions of "parent" are the same hash
+            // (the miner sets `parents[c]` and `voter_parent` both to the
+            // chain tip). Letting them differ would let the content claim a
+            // different chain position than the one the parent proof binds.
+            if *voter_parent != block.parent {
+                return Err(ValidationError::VoterParentMismatch);
             }
             for w in votes.windows(2) {
                 if w[0] >= w[1] {
@@ -424,10 +478,24 @@ pub fn validate_block(block: &PrismBlock, params: &Params) -> Result<Validated, 
         BlockContent::Proposer { .. } => {}
     }
 
+    // R-3: the slot this block occupies in both (m+2)-leaf trees, fixed by
+    // sortition: voter chain c -> c, tx -> m, proposer -> m+1. Sortition
+    // consistency was checked above, so `content` determines it.
+    let m = params.m_voter_chains as usize;
+    let leaf_count = m + 2;
+    let slot = match &block.content {
+        BlockContent::Voter { chain, .. } => *chain as usize,
+        BlockContent::Transaction { .. } => m,
+        BlockContent::Proposer { .. } => m + 1,
+    };
+
     // Merkle proof for parent
     let parent_leaf = H256::from_slice(blake3::hash(block.parent.as_bytes()).as_bytes());
     if !verify_merkle_proof(&block.header.parents_root, &parent_leaf, &block.parent_proof) {
         return Err(ValidationError::InvalidParentProof);
+    }
+    if !proof_binds_index(&block.parent_proof, leaf_count, slot) {
+        return Err(ValidationError::ParentProofWrongIndex);
     }
 
     // Merkle proof for content
@@ -435,6 +503,9 @@ pub fn validate_block(block: &PrismBlock, params: &Params) -> Result<Validated, 
     let content_leaf = H256::from_slice(blake3::hash(&content_encoded).as_bytes());
     if !verify_merkle_proof(&block.header.content_root, &content_leaf, &block.content_proof) {
         return Err(ValidationError::InvalidContentProof);
+    }
+    if !proof_binds_index(&block.content_proof, leaf_count, slot) {
+        return Err(ValidationError::ContentProofWrongIndex);
     }
 
     Ok(Validated(block.clone()))
@@ -478,6 +549,215 @@ mod tests {
             let leaf = leaves[i];
             assert!(verify_merkle_proof(&root, &leaf, &proof), "proof failed for index {i}");
         }
+    }
+
+    // ── R-3 tests ─────────────────────────────────────────────────────────────
+
+    fn fast_params(m: u16) -> Params {
+        let difficulty = U256::max_value();
+        let f = difficulty / U256::from(m + 2);
+        Params {
+            m_voter_chains: m,
+            difficulty,
+            f_v: f,
+            f_t: f,
+            f_p: f,
+            target_interval_ms: 1_000,
+            chain_spec_genesis: H256::zero(),
+            retarget_enabled: false,
+        }
+    }
+
+    fn leaf_of_parent(h: &H256) -> H256 {
+        H256::from_slice(blake3::hash(h.as_bytes()).as_bytes())
+    }
+
+    fn leaf_of_content(c: &BlockContent) -> H256 {
+        H256::from_slice(blake3::hash(&c.encode()).as_bytes())
+    }
+
+    /// Canonical honest content for slot `s` (distinct per slot).
+    fn content_for_slot(m: usize, s: usize) -> BlockContent {
+        if s < m {
+            BlockContent::Voter { chain: s as u16, voter_parent: dummy_h256(s as u8 + 1), votes: vec![] }
+        } else if s == m {
+            BlockContent::Transaction { txs: vec![vec![1, 2, 3]] }
+        } else {
+            BlockContent::Proposer { tx_refs: vec![dummy_h256(9)], prop_refs: vec![] }
+        }
+    }
+
+    fn honest_parents(m: usize) -> Vec<H256> {
+        (0..m + 2).map(|s| dummy_h256(s as u8 + 1)).collect()
+    }
+
+    /// Mine a header over the two trees whose hash sortitions to `slot`'s type.
+    fn mine_header(
+        parents: &[H256],
+        contents: &[BlockContent],
+        params: &Params,
+        slot: usize,
+    ) -> SuperHeader {
+        let m = params.m_voter_chains as usize;
+        let want = if slot < m {
+            Sortition::Voter(slot as u16)
+        } else if slot == m {
+            Sortition::Transaction
+        } else {
+            Sortition::Proposer
+        };
+        let pl: Vec<H256> = parents.iter().map(leaf_of_parent).collect();
+        let cl: Vec<H256> = contents.iter().map(leaf_of_content).collect();
+        for nonce in 0..10_000_000u64 {
+            let header = SuperHeader {
+                parents_root: merkle_root(&pl),
+                content_root: merkle_root(&cl),
+                timestamp_ms: 0,
+                nonce,
+                difficulty: params.difficulty,
+            };
+            if sortition(&block_hash(&header), params) == want {
+                return header;
+            }
+        }
+        panic!("no nonce found");
+    }
+
+    /// Assemble a block; each proof is taken at the stated index of its tree.
+    fn assemble(
+        header: SuperHeader,
+        parents: &[H256],
+        contents: &[BlockContent],
+        parent: H256,
+        content: BlockContent,
+        parent_idx: usize,
+        content_idx: usize,
+    ) -> PrismBlock {
+        let pl: Vec<H256> = parents.iter().map(leaf_of_parent).collect();
+        let cl: Vec<H256> = contents.iter().map(leaf_of_content).collect();
+        PrismBlock {
+            header,
+            parent,
+            content,
+            parent_proof: merkle_proof(&pl, parent_idx),
+            content_proof: merkle_proof(&cl, content_idx),
+        }
+    }
+
+    #[test]
+    fn r3_expected_directions_match_real_proofs() {
+        for m in [1usize, 2, 3, 4, 7, 8, 100] {
+            let n = m + 2;
+            let leaves: Vec<H256> = (0..n).map(|i| H256::from_low_u64_be(i as u64 + 1)).collect();
+            for i in 0..n {
+                let real: Vec<bool> = merkle_proof(&leaves, i).0.iter().map(|(_, r)| *r).collect();
+                assert_eq!(expected_proof_directions(n, i).unwrap(), real, "n={n} i={i}");
+            }
+            assert!(expected_proof_directions(n, n).is_none());
+        }
+        assert_eq!(expected_proof_directions(1, 0), Some(vec![]));
+    }
+
+    #[test]
+    fn r3_honest_block_validates_for_every_slot() {
+        for m in [1usize, 3, 4] {
+            let params = fast_params(m as u16);
+            let parents = honest_parents(m);
+            let contents: Vec<BlockContent> = (0..m + 2).map(|s| content_for_slot(m, s)).collect();
+            for s in 0..m + 2 {
+                let header = mine_header(&parents, &contents, &params, s);
+                let b = assemble(header, &parents, &contents, parents[s], contents[s].clone(), s, s);
+                assert!(validate_block(&b, &params).is_ok(), "m={m} slot={s}");
+            }
+        }
+    }
+
+    #[test]
+    fn r3_wrong_index_proofs_rejected() {
+        let m = 4usize;
+        let params = fast_params(m as u16);
+        let parents = honest_parents(m);
+        let contents: Vec<BlockContent> = (0..m + 2).map(|s| content_for_slot(m, s)).collect();
+        let header = mine_header(&parents, &contents, &params, m);
+
+        // Content proof for the right leaf taken at a different index. Put the
+        // tx content at slot 0 as well so the proof genuinely verifies there.
+        let mut dup = contents.clone();
+        dup[0] = contents[m].clone();
+        let header_dup = mine_header(&parents, &dup, &params, m);
+        let b = assemble(header_dup, &parents, &dup, parents[m], dup[m].clone(), m, 0);
+        assert_eq!(validate_block(&b, &params).err(), Some(ValidationError::ContentProofWrongIndex));
+
+        // Parent proof for the right leaf at the wrong index (parent also at slot 0).
+        let mut pdup = parents.clone();
+        pdup[0] = parents[m];
+        let header_p = mine_header(&pdup, &contents, &params, m);
+        let b = assemble(header_p, &pdup, &contents, pdup[m], contents[m].clone(), 0, m);
+        assert_eq!(validate_block(&b, &params).err(), Some(ValidationError::ParentProofWrongIndex));
+
+        // Sanity: the honest block on the original header still passes.
+        let ok = assemble(header, &parents, &contents, parents[m], contents[m].clone(), m, m);
+        assert!(validate_block(&ok, &params).is_ok());
+    }
+
+    #[test]
+    fn r3_extra_length_proofs_rejected() {
+        let m = 4usize; // 6 leaves -> depth 3; a 16-leaf tree has depth 4
+        let params = fast_params(m as u16);
+        let parents = honest_parents(m);
+        let contents: Vec<BlockContent> = (0..m + 2).map(|s| content_for_slot(m, s)).collect();
+
+        // Deeper content tree with the tx leaf still at index m.
+        let mut deep = contents.clone();
+        for i in 0..10 {
+            deep.push(BlockContent::Transaction { txs: vec![vec![200, i]] });
+        }
+        let header = mine_header(&parents, &deep, &params, m);
+        let b = assemble(header, &parents, &deep, parents[m], deep[m].clone(), m, m);
+        assert_eq!(validate_block(&b, &params).err(), Some(ValidationError::ContentProofWrongIndex));
+
+        // Deeper parent tree.
+        let mut pdeep = parents.clone();
+        for i in 0..10u8 {
+            pdeep.push(dummy_h256(100 + i));
+        }
+        let header = mine_header(&pdeep, &contents, &params, m);
+        let b = assemble(header, &pdeep, &contents, pdeep[m], contents[m].clone(), m, m);
+        assert_eq!(validate_block(&b, &params).err(), Some(ValidationError::ParentProofWrongIndex));
+    }
+
+    #[test]
+    fn r3_equivocation_under_one_header_only_one_body_validates() {
+        let m = 4usize;
+        let params = fast_params(m as u16);
+        let parents = honest_parents(m);
+        let mut contents: Vec<BlockContent> = (0..m + 2).map(|s| content_for_slot(m, s)).collect();
+        let body_a = contents[m].clone();
+        // Attacker's alternative tx body, smuggled into the same tree at slot 0.
+        let body_b = BlockContent::Transaction { txs: vec![vec![0xde, 0xad]] };
+        contents[0] = body_b.clone();
+        let header = mine_header(&parents, &contents, &params, m);
+
+        let a = assemble(header.clone(), &parents, &contents, parents[m], body_a, m, m);
+        let b_at_0 = assemble(header.clone(), &parents, &contents, parents[m], body_b.clone(), m, 0);
+        let b_at_m = assemble(header, &parents, &contents, parents[m], body_b, m, m);
+        assert_eq!(block_hash(&a.header), block_hash(&b_at_0.header));
+        assert!(validate_block(&a, &params).is_ok());
+        assert_eq!(validate_block(&b_at_0, &params).err(), Some(ValidationError::ContentProofWrongIndex));
+        assert_eq!(validate_block(&b_at_m, &params).err(), Some(ValidationError::InvalidContentProof));
+    }
+
+    #[test]
+    fn r3_voter_parent_must_equal_block_parent() {
+        let m = 3usize;
+        let params = fast_params(m as u16);
+        let parents = honest_parents(m);
+        let mut contents: Vec<BlockContent> = (0..m + 2).map(|s| content_for_slot(m, s)).collect();
+        contents[1] =
+            BlockContent::Voter { chain: 1, voter_parent: dummy_h256(0xee), votes: vec![] };
+        let header = mine_header(&parents, &contents, &params, 1);
+        let b = assemble(header, &parents, &contents, parents[1], contents[1].clone(), 1, 1);
+        assert_eq!(validate_block(&b, &params).err(), Some(ValidationError::VoterParentMismatch));
     }
 
     #[test]

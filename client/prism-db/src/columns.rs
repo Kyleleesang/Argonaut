@@ -22,14 +22,13 @@ pub const BLOCK_STATUS: &str = "BLOCK_STATUS";
 /// retarget), so it survives a node restart instead of resetting to
 /// `Params::testnet()`'s initial guess every time.
 pub const CURRENT_DIFFICULTY_TARGET: &str = "CURRENT_DIFFICULTY_TARGET";
-/// Every tx hash `PrismLedger` has ever emitted in a `BuildLedger` delta
-/// (key-only marker CF, empty value) -- the durable half of
-/// `PrismLedger::emitted_tx_hashes`. B5 pruning prerequisite: once tx-block
-/// *bodies* become prunable, `PrismLedger::recover`'s old approach (replay
-/// every confirmed level's `BuildLedger` DFS purely to repopulate this set)
-/// stops working, since the bodies it would read may already be gone. This
-/// CF makes dedup state itself durable instead of derived, independent of
-/// whether bodies still exist.
+/// **Unused since R-6 (2026-09 design review); kept only so existing
+/// databases still open.** Used to hold every tx hash `PrismLedger` had ever
+/// emitted, for a global cross-level dedup. That dedup was written before the
+/// Substrate block executed, so a tx that failed (e.g. a nonce ordered too
+/// early) was blacklisted forever, and a crash between confirm and import
+/// made a restarted node rebuild a level with its txs deduped away. Dedup is
+/// now per-level only; replay protection is the runtime's nonce/era.
 pub const EMITTED_TX_HASH: &str = "EMITTED_TX_HASH";
 /// Single-key CF holding `PrismChain`'s serialized `ChainCheckpoint` (B5
 /// pruning prerequisite) -- lets `PrismChain::with_db` restart in

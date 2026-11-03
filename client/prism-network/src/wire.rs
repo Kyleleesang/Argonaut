@@ -223,6 +223,15 @@ impl PrismNetworkWorker {
     /// on every new `PrismNetworkWorker`, but `has_block` reads the
     /// replay-restored chain state directly, so a restarted node doesn't
     /// re-request blocks it already recovered via `PrismChain::with_db`.
+    ///
+    /// B-18: the frontier-derived seed alone is not enough -- `has_block` is
+    /// true for orphans, so once gossip has delivered the tips the seed is
+    /// empty forever while the orphans' ancestors are still missing. The seed
+    /// is therefore also extended with `PrismChain::orphan_missing_refs`.
+    /// Because this runs on every 30s resync tick for every peer, an ancestor
+    /// a pruning peer can't serve (and `backfill` dropped after
+    /// `MAX_ROUNDS_MISSING`) is re-requested from every other peer (e.g. the
+    /// archive node) until it resolves.
     async fn request_status_and_maybe_backfill(&mut self, peer: PeerId) {
         let request = SyncRequest::GetStatus.encode();
         let Some(response) = sync_request(&self.network, peer, request).await else { return };
@@ -232,20 +241,32 @@ impl PrismNetworkWorker {
             return;
         };
 
-        let seed: Vec<H256> = {
+        let (seed, frontier_n, orphan_n): (Vec<H256>, usize, usize) = {
             let chain = self.chain.lock().expect("PrismChain mutex poisoned");
-            voter_tips
+            let mut seed: Vec<H256> = voter_tips
                 .iter()
                 .chain(unreferenced_proposers.iter())
                 .chain(unreferenced_tx_blocks.iter())
                 .filter(|h| !chain.has_block(h))
                 .copied()
-                .collect()
+                .collect();
+            let frontier_n = seed.len();
+            let mut in_seed: HashSet<H256> = seed.iter().copied().collect();
+            for h in chain.orphan_missing_refs() {
+                if in_seed.insert(h) {
+                    seed.push(h);
+                }
+            }
+            let orphan_n = seed.len() - frontier_n;
+            (seed, frontier_n, orphan_n)
         };
         if seed.is_empty() {
             return;
         }
-        log::info!(target: "prism", "backfill: {} unknown hash(es) from {peer}", seed.len());
+        log::info!(
+            target: "prism",
+            "backfill: {frontier_n} unknown hash(es) + {orphan_n} orphan ancestor(s) from {peer}"
+        );
         self.backfill(peer, seed).await;
     }
 

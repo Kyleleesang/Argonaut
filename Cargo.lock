@@ -351,6 +351,7 @@ version = "0.1.0"
 dependencies = [
  "argonaut-primitives-prism",
  "argonaut-prism-db",
+ "log",
  "parity-scale-codec",
  "sp-core",
  "tempfile",

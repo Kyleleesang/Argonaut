@@ -280,7 +280,12 @@ pub fn new_full<N: sc_network::NetworkBackend<Block, <Block as sp_runtime::trait
     // observes via gossip above, so every honest node derives byte-identical
     // Substrate blocks independently; this isn't gated on being a block
     // author the way PoW/PoA authorship would be.
-    task_manager.spawn_handle().spawn(
+    // R-6: essential, not plain `spawn`. The bridge now returns (stops) on any
+    // build/import failure rather than skipping the level; a plain task would
+    // just end silently while the node kept running with Substrate frozen
+    // behind Prism. An essential task ending shuts the whole node down loudly,
+    // and a restart re-derives from Substrate's best via `PrismLedger::recover`.
+    task_manager.spawn_essential_handle().spawn(
         "prism-bridge",
         Some("prism"),
         run_prism_bridge(

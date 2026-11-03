@@ -90,10 +90,9 @@ impl PrismDb {
         }
     }
 
-    /// Record `hash` as an emitted tx hash (B5 pruning prerequisite: the
-    /// durable half of `PrismLedger::emitted_tx_hashes`, so restart-recovery
-    /// no longer needs to re-derive dedup state by re-reading tx bodies that
-    /// may since have been pruned). Key-only marker CF; value is unused.
+    /// Record `hash` in the legacy `EMITTED_TX_HASH` CF. **No longer called
+    /// by `PrismLedger` since R-6** (see the column's doc comment); kept for
+    /// existing databases and tests.
     pub fn put_emitted_tx_hash(&self, hash: &[u8; 32]) -> Result<(), DbError> {
         let cf = self.db.cf_handle(EMITTED_TX_HASH).expect("EMITTED_TX_HASH CF missing");
         self.db.put_cf(cf, hash, [])?;

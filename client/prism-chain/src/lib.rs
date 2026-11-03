@@ -628,6 +628,51 @@ impl PrismChain {
         }
     }
 
+    /// B-18: every ancestor hash that some orphan is still waiting on and that
+    /// we do not have at all -- the source of truth for "ancestors we still
+    /// need to fetch".
+    ///
+    /// Uses the same readiness conditions as `drain_orphans` (proposer:
+    /// `parent`, `tx_refs`, `prop_refs`; voter: `voter_parent`; transaction:
+    /// none), then keeps only refs that fail `has_block` -- so a ref that is
+    /// itself an orphan is excluded (its own missing deps are reported via
+    /// that orphan), as is anything known or pruned-tombstoned.
+    ///
+    /// Why this exists: filtering only a peer's advertised *frontier* by
+    /// `has_block` misses these. `has_block` is true for orphans, so once
+    /// gossip has delivered the tips (as orphans) the frontier-derived
+    /// backfill seed is empty forever and the orphans' missing ancestors are
+    /// never requested -- the voter chains stay disconnected and the node's
+    /// ledger never confirms. Bounded by `MAX_ORPHANS` orphans (times their
+    /// per-block ref counts), deduplicated.
+    pub fn orphan_missing_refs(&self) -> Vec<H256> {
+        let mut seen: HashSet<H256> = HashSet::new();
+        let mut out: Vec<H256> = Vec::new();
+        let mut want = |r: &H256, known: bool, this: &Self| {
+            if !known && !this.has_block(r) && seen.insert(*r) {
+                out.push(*r);
+            }
+        };
+        for block in self.orphans.values() {
+            match &block.content {
+                BlockContent::Proposer { tx_refs, prop_refs } => {
+                    want(&block.parent, self.proposer_meta.contains_key(&block.parent), self);
+                    for r in tx_refs {
+                        want(r, self.known_tx_blocks.contains(r), self);
+                    }
+                    for r in prop_refs {
+                        want(r, self.proposer_meta.contains_key(r), self);
+                    }
+                }
+                BlockContent::Voter { voter_parent, .. } => {
+                    want(voter_parent, self.voter_meta.contains_key(voter_parent), self);
+                }
+                BlockContent::Transaction { .. } => {}
+            }
+        }
+        out
+    }
+
     /// Drain orphans whose dependencies are now satisfied.
     fn drain_orphans(&mut self) {
         let resolved: Vec<H256> = self
@@ -870,11 +915,33 @@ impl PrismChain {
             return;
         }
         let mut visited = HashSet::new();
+        let mut stalled = false;
         for level in (self.last_body_pruned_level + 1)..=ledger_confirmed_level {
-            let Some(&leader) = self.level_proposer.get(&level) else { continue };
+            // R-5: the leader to sweep is the one the *ledger confirmed*
+            // (recorded in `PROPOSER_LEADER_SEQUENCE`), never
+            // `level_proposer[level]`, which is merely the first proposer
+            // THIS node saw at that level -- local state, not consensus. If
+            // stage-2 confirmed P while this node first saw P', sweeping
+            // `level_proposer` would delete the wrong subtree's bodies.
+            // A level with no recorded leader is left unpruned (and stops
+            // the sweep cursor there so it's retried) rather than guessed.
+            let leader = match db.get_h256(columns::PROPOSER_LEADER_SEQUENCE, &level.to_le_bytes()) {
+                Ok(Some(leader)) => leader,
+                _ => {
+                    log::warn!(
+                        target: "prism",
+                        "R-5: no recorded confirmed leader for level {level} <= ledger_confirmed_level \
+                         {ledger_confirmed_level}; not pruning it"
+                    );
+                    stalled = true;
+                    continue;
+                }
+            };
             prune_proposer_subtree_bodies(&db, &leader, &mut visited);
         }
-        self.last_body_pruned_level = ledger_confirmed_level;
+        if !stalled {
+            self.last_body_pruned_level = ledger_confirmed_level;
+        }
     }
 
     fn persist(&self, block: &PrismBlock) {

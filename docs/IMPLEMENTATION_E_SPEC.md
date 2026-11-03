@@ -1,9 +1,8 @@
 # Implementation E — Production Bootstrap (0→1): Pallets & Utilities
 
-**Status: committed spec (2026-07-09).** This document turns
-`docs/POTENTIAL_PALLET_INTEGRATIONS.md` (the *menu*, 2026-07-08) into a
-committed, sequenced implementation plan. Where the two disagree, **this spec
-wins**. It is written to be implementable milestone-by-milestone without
+**Status: committed spec (2026-07-09), not yet implemented.** The committed,
+sequenced plan for production bootstrap (it absorbed and replaced the earlier
+pallet-integration "menu" doc, removed 2026-09-30 — see git history). It is written to be implementable milestone-by-milestone without
 re-deriving decisions ("Sonnet-ready", same contract as
 `IMPLEMENTATION_D_SPEC.md`).
 
@@ -57,8 +56,8 @@ ship to a real network so their parameters are governable.
    `parameter_types!`/`#[pallet::constant]`; magic numbers get a named
    constant with a comment stating its unit and rationale.
 8. **Docs discipline:** each milestone updates `docs/ARCHITECTURE.md` §2
-   (crate map) and the baseline table in `POTENTIAL_PALLET_INTEGRATIONS.md`
-   §0 when the runtime pallet set changes.
+   (crate map) and this spec's own E.1 baseline table when the runtime
+   pallet set changes.
 9. **(Added 2026-07-16) Mainnet-value launch is gated on FIPS 206 final +
    `fn-dsa` 1.0.** The chain's Falcon verifier (`fn-dsa`, pinned 0.2.0) is
    pre-standard by its author's own declaration; keys/signatures may cease to
@@ -82,6 +81,7 @@ ship to a real network so their parameters are governable.
 | `pallet_insecure_randomness_collective_flip` | dev-grade randomness | policy decision in E4; never for economic security |
 | `pallet_falcon_registry` | `KeyDeposit = 1×ED = 500` | re-price in E0/E1 |
 | `pallets/agg-verify` | in workspace, **not wired** into `construct_runtime!` | Implementation C concern, not E |
+| Storage pallets (`provider-registry`, `storage-deals`, `storage-proofs`, `payment-channels`) | wired after `Sudo` by Implementation D2 (2026-07-09) | D concern; still need E1 real weights |
 | Chain specs | `development_config` / `local_testnet_config` from `//Alice`-style seeds; `GenesisBuilder::preset_names() == []` | needs E0 |
 | Node RPC | `substrate-frame-rpc-system` + `pallet-transaction-payment-rpc` wired (`node/src/rpc.rs`) | baseline OK; E4 adds contracts RPC, E5 hardens |
 | SS58 prefix | 42 (generic Substrate) | needs E0 registration |
