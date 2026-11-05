@@ -198,6 +198,13 @@ pub fn new_full<N: sc_network::NetworkBackend<Block, <Block as sp_runtime::trait
     // Prism-specific genesis config is needed.
     let prism_chain_spec_params =
         crate::chain_spec::prism_params_from_properties(&config.chain_spec.properties());
+    // D-5: fail fast on out-of-range consensus params (see
+    // `chain_spec::validate_prism_params`).
+    crate::chain_spec::validate_prism_params(&prism_chain_spec_params).map_err(ServiceError::Other)?;
+    if prism_prune {
+        crate::chain_spec::validate_k_prune(prism_k_prune, &prism_chain_spec_params)
+            .map_err(ServiceError::Other)?;
+    }
     let prism_params = {
         let mut p = PrismParams::testnet();
         p.m_voter_chains = prism_chain_spec_params.m_voter_chains;

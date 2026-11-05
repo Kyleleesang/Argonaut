@@ -97,7 +97,7 @@ Three reviewers found this independently.
   - Pruning keeps `last_voted_level` at the frontier.
   - Honest miners must already produce votes of this shape; verify that first.
 
-**Effort:** 4a about 1 h; 4b 2–3 days. **Status:** OPEN.
+**Effort:** 4a about 1 h; 4b 2–3 days. **Status:** 4b DONE (unit-tested; live-verify pending).
 
 ### R-5 — Pruning drops the first-seen proposer, not the confirmed leader; BuildLedger skips missing bodies silently — HIGH
 **Flaw:** `prune_confirmed_bodies` (`prism-chain/src/lib.rs:~919`) treats `level_proposer[level]` as the leader. `build_ledger_delta_for_leader` / `expand_proposer_tx_refs` skip missing bodies (`if let Ok(Some(..))`, `prism-ledger/src/lib.rs:245,278`), and the leader timestamp falls back to `unwrap_or(0)` (`:216`).
@@ -178,7 +178,7 @@ Three reviewers found this independently.
 - Put the genesis hash in the protocol names.
 - Enforce `k_prune ≥ max(k_deep, reorg bound)`.
 
-**Effort:** 2–3 days. The range validation is cheap and can go now. **Status:** OPEN.
+**Effort:** 2–3 days. The range validation is cheap and can go now. **Status:** range validation DONE (unit-tested; live-verify pending: `validate_prism_params`, `validate_k_prune`); genesis-hash binding, protocol names, missing-key hard-error and difficulty-mismatch refusal still OPEN.
 
 ### D-6 — The equal 1/(m+2) block-type split caps throughput at ~0.35 tx/s and puts confirmation at ~19 min — HIGH — DECISION
 **Flaw:** `f_v = f_t = f_p = difficulty/(m+2)` (`primitives/prism/src/lib.rs:84-91`), so only 1 in 102 mined blocks carries transactions. The plans quote "~seconds" (guide §5), ~70k tx/s and point-of-sale use (dApp catalog), and short inclusion times (frontend).
