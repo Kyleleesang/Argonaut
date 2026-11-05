@@ -112,6 +112,10 @@ pub struct PrismChain {
     /// `orphans.len() >= MAX_ORPHANS`. Kept in sync with `orphans` at every
     /// insert (`insert_orphan`) and every removal (`drain_orphans`).
     orphan_order: VecDeque<H256>,
+    /// N-3: hashes of orphans dropped by the `MAX_ORPHANS` cap since the
+    /// last `take_evicted_orphans`, so the network layer can forget them from
+    /// its seen-cache and let a re-gossip actually be re-processed.
+    evicted_orphans: Vec<H256>,
     voter_meta: HashMap<H256, VoterMeta>,
     proposer_meta: HashMap<H256, ProposerMeta>,
     db: Option<Arc<PrismDb>>,
@@ -224,6 +228,7 @@ impl PrismChain {
             votes: HashMap::new(),
             orphans: HashMap::new(),
             orphan_order: VecDeque::new(),
+            evicted_orphans: Vec::new(),
             voter_meta,
             proposer_meta,
             db: None,
@@ -407,6 +412,11 @@ impl PrismChain {
         }
     }
 
+    /// N-3: drain the hashes of orphans evicted by the cap (see `evicted_orphans`).
+    pub fn take_evicted_orphans(&mut self) -> Vec<H256> {
+        std::mem::take(&mut self.evicted_orphans)
+    }
+
     /// B-13: insert into `orphans`, evicting the single oldest entry first if
     /// already at `MAX_ORPHANS`. A block PoW-valid enough to reach here but
     /// evicted is simply lost (its sender may re-gossip it, or it resolves if
@@ -417,6 +427,9 @@ impl PrismChain {
         if self.orphans.len() >= MAX_ORPHANS {
             if let Some(oldest) = self.orphan_order.pop_front() {
                 self.orphans.remove(&oldest);
+                if self.evicted_orphans.len() < MAX_ORPHANS {
+                    self.evicted_orphans.push(oldest);
+                }
             }
         }
         self.orphans.insert(hash, block);

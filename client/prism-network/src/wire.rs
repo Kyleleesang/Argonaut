@@ -12,7 +12,7 @@
 //! protocol configs, generic over `N: NetworkBackend` so it works with either
 //! network backend (`NetworkWorker`/libp2p or `Litep2pNetworkBackend`) the node
 //! is started with.
-use crate::{handle_announcement, BlockAnnouncement, SyncRequest, SyncResponse};
+use crate::{handle_announcement, BlockAnnouncement, SeenCache, SyncRequest, SyncResponse};
 use argonaut_primitives_prism::{block_hash, H256};
 use argonaut_prism_chain::PrismChain;
 use argonaut_prism_db::PrismDb;
@@ -22,11 +22,62 @@ use sc_network::{
         IncomingRequest, NonReservedPeerMode, NotificationService, OutgoingResponse, SetConfig,
     },
     service::traits::{NetworkBackend, NetworkService as NetworkServiceTrait, NotificationEvent, ValidationResult},
-    IfDisconnected, NetworkRequest, NotificationMetrics, PeerId, ProtocolName,
+    IfDisconnected, NetworkRequest, NotificationMetrics, PeerId, ProtocolName, ReputationChange,
+    RequestFailure,
 };
 use futures::FutureExt;
 use sp_runtime::traits::Block as BlockT;
 use std::collections::{HashMap, HashSet};
+
+/// N-2: max hashes honoured in one `GetBlocks`. Honest callers send at most 64
+/// (`backfill`'s BATCH); a ~32k-hash request could otherwise make us
+/// allocate ~1 GB of blocks.
+pub const MAX_GET_BLOCKS_HASHES: usize = 128;
+/// N-2: byte budget for one `Blocks` response (the protocol's response limit
+/// is 16 MiB; leave headroom for the SCALE envelope).
+pub const MAX_RESPONSE_BYTES: usize = 12 * 1024 * 1024;
+
+/// N-2: reputation costs. Small relative to sc-network's ban threshold so a
+/// single glitch doesn't ban a peer, but repeat offenders do.
+const REP_BAD_REQUEST: ReputationChange =
+    ReputationChange::new(-(1 << 12), "prism: malformed or oversized sync request");
+const REP_INVALID_BLOCK: ReputationChange = ReputationChange::new(-(1 << 14), "prism: invalid block");
+const REP_TIMEOUT: ReputationChange = ReputationChange::new(-(1 << 8), "prism: sync request timeout");
+
+/// N-2: answer a `GetBlocks`. `Err(())` = bad request (too many hashes).
+/// Dedups (order-preserving) and stops adding blocks once the encoded size
+/// would exceed `MAX_RESPONSE_BYTES`.
+pub fn serve_get_blocks(
+    hashes: Vec<H256>,
+    get: impl FnMut(&H256) -> Option<argonaut_primitives_prism::PrismBlock>,
+) -> Result<Vec<argonaut_primitives_prism::PrismBlock>, ()> {
+    serve_get_blocks_with_budget(hashes, get, MAX_RESPONSE_BYTES)
+}
+
+pub(crate) fn serve_get_blocks_with_budget(
+    hashes: Vec<H256>,
+    mut get: impl FnMut(&H256) -> Option<argonaut_primitives_prism::PrismBlock>,
+    budget: usize,
+) -> Result<Vec<argonaut_primitives_prism::PrismBlock>, ()> {
+    if hashes.len() > MAX_GET_BLOCKS_HASHES {
+        return Err(());
+    }
+    let mut uniq = HashSet::new();
+    let mut out = Vec::new();
+    let mut bytes = 0usize;
+    for h in hashes {
+        if !uniq.insert(h) {
+            continue;
+        }
+        let Some(block) = get(&h) else { continue };
+        bytes = bytes.saturating_add(parity_scale_codec::Encode::encoded_size(&block));
+        if bytes > budget {
+            break;
+        }
+        out.push(block);
+    }
+    Ok(out)
+}
 use std::sync::{Arc, Mutex};
 
 /// Build the `/argonaut/prism/blocks/1` notification protocol config + its
@@ -100,7 +151,7 @@ pub struct PrismNetworkWorker {
     /// instead of waiting out a fixed poll interval. Shared with (constructed
     /// by) the caller, which also hands the same `Arc` to the bridge.
     confirmation_notify: Arc<tokio::sync::Notify>,
-    seen: HashSet<H256>,
+    seen: SeenCache,
     peers: HashSet<PeerId>,
 }
 
@@ -123,7 +174,7 @@ impl PrismNetworkWorker {
                 chain,
                 db,
                 confirmation_notify,
-                seen: HashSet::new(),
+                seen: SeenCache::new(),
                 peers: HashSet::new(),
             },
             mined_tx,
@@ -146,6 +197,9 @@ impl PrismNetworkWorker {
         if missing.is_empty() {
             return;
         }
+        // N-2: stay under the server's per-request hash cap.
+        let mut missing = missing;
+        missing.truncate(MAX_GET_BLOCKS_HASHES);
         let request = SyncRequest::GetBlocks(missing).encode();
         let Some(response) = sync_request(&self.network, from, request).await else { return };
         let Ok(SyncResponse::Blocks(blocks)) = SyncResponse::decode(&mut response.as_slice()) else {
@@ -173,6 +227,11 @@ impl PrismNetworkWorker {
             let params = chain.params.clone();
             handle_announcement(announcement, &params, &mut self.seen, &mut chain)
         };
+        if outcome.invalid {
+            if let Some(peer) = source {
+                self.network.report_peer(peer, REP_INVALID_BLOCK);
+            }
+        }
         if outcome.may_confirm {
             // AF-1: wake the bridge immediately rather than making it wait
             // out its own poll interval -- `notify_one` stores a permit if
@@ -194,24 +253,27 @@ impl PrismNetworkWorker {
         }
     }
 
-    fn answer_sync_request(&self, payload: &[u8]) -> Result<Vec<u8>, ()> {
-        match SyncRequest::decode(&mut &payload[..]).map_err(|_| ())? {
+    /// N-2: also returns the reputation changes to apply to the requester.
+    fn answer_sync_request(&self, payload: &[u8]) -> (Result<Vec<u8>, ()>, Vec<ReputationChange>) {
+        let Ok(request) = SyncRequest::decode(&mut &payload[..]) else {
+            return (Err(()), vec![REP_BAD_REQUEST]);
+        };
+        match request {
             SyncRequest::GetBlocks(hashes) => {
-                let blocks = hashes
-                    .into_iter()
-                    .filter_map(|h| self.db.get_block(&h).ok().flatten())
-                    .collect();
-                Ok(SyncResponse::Blocks(blocks).encode())
+                match serve_get_blocks(hashes, |h| self.db.get_block(h).ok().flatten()) {
+                    Ok(blocks) => (Ok(SyncResponse::Blocks(blocks).encode()), Vec::new()),
+                    Err(()) => (Err(()), vec![REP_BAD_REQUEST]),
+                }
             }
             SyncRequest::GetStatus => {
                 let chain = self.chain.lock().expect("PrismChain mutex poisoned");
-                Ok(SyncResponse::Status {
+                (Ok(SyncResponse::Status {
                     proposer_best_level: chain.proposer_best_level,
                     voter_tips: chain.voter_tips.iter().map(|(h, _)| *h).collect(),
                     unreferenced_proposers: chain.unreferenced_proposers.iter().copied().collect(),
                     unreferenced_tx_blocks: chain.unreferenced_tx_blocks.iter().copied().collect(),
                 }
-                .encode())
+                .encode()), Vec::new())
             }
         }
     }
@@ -372,10 +434,10 @@ impl PrismNetworkWorker {
                 }
                 request = self.sync_requests.recv().fuse() => {
                     let Ok(IncomingRequest { payload, pending_response, .. }) = request else { return };
-                    let result = self.answer_sync_request(&payload);
+                    let (result, reputation_changes) = self.answer_sync_request(&payload);
                     let _ = pending_response.send(OutgoingResponse {
                         result,
-                        reputation_changes: Vec::new(),
+                        reputation_changes,
                         sent_feedback: None,
                     });
                 }
@@ -433,6 +495,11 @@ async fn sync_request(
     );
     match rx.await {
         Ok(Ok((response, _))) => Some(response),
+        // N-2: only a timeout is the peer's fault; unreachable/refused isn't.
+        Ok(Err(RequestFailure::Network(sc_network::request_responses::OutboundFailure::Timeout))) => {
+            network.report_peer(peer, REP_TIMEOUT);
+            None
+        }
         _ => None,
     }
 }

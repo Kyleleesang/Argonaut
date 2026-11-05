@@ -41,7 +41,7 @@ fn mine_one(chain: &PrismChain, params: &Params, queue: u64) -> PrismBlock {
 fn loopback_valid_block_is_accepted_and_gossiped() {
     let params = fast_params(4);
     let mut chain = PrismChain::new(params.clone());
-    let mut seen = HashSet::new();
+    let mut seen = SeenCache::new();
 
     let block = mine_one(&chain, &params, 0);
     let outcome = handle_announcement(BlockAnnouncement::Full(block.clone()), &params, &mut seen, &mut chain);
@@ -61,7 +61,7 @@ fn loopback_valid_block_is_accepted_and_gossiped() {
 fn duplicate_announcement_is_ignored_via_seen_cache() {
     let params = fast_params(4);
     let mut chain = PrismChain::new(params.clone());
-    let mut seen = HashSet::new();
+    let mut seen = SeenCache::new();
 
     let block = mine_one(&chain, &params, 0);
     let first = handle_announcement(BlockAnnouncement::Full(block.clone()), &params, &mut seen, &mut chain);
@@ -76,7 +76,7 @@ fn duplicate_announcement_is_ignored_via_seen_cache() {
 fn structurally_invalid_block_is_rejected_and_not_inserted() {
     let params = fast_params(4);
     let mut chain = PrismChain::new(params.clone());
-    let mut seen = HashSet::new();
+    let mut seen = SeenCache::new();
 
     let mut block = mine_one(&chain, &params, 0);
     // Corrupt the parent Merkle proof so `validate_block` must reject it.
@@ -97,7 +97,7 @@ fn structurally_invalid_block_is_rejected_and_not_inserted() {
 fn hash_only_announcement_requests_nothing_and_gossips_nothing() {
     let params = fast_params(4);
     let mut chain = PrismChain::new(params.clone());
-    let mut seen = HashSet::new();
+    let mut seen = SeenCache::new();
 
     let outcome =
         handle_announcement(BlockAnnouncement::Hash(H256::from([1u8; 32])), &params, &mut seen, &mut chain);
@@ -113,7 +113,7 @@ fn hash_only_announcement_requests_nothing_and_gossips_nothing() {
 fn multi_round_self_mining_loopback_preserves_invariants() {
     let params = fast_params(4);
     let mut chain = PrismChain::new(params.clone());
-    let mut seen = HashSet::new();
+    let mut seen = SeenCache::new();
 
     for round in 0..40u64 {
         let block = mine_one(&chain, &params, round % 8);
@@ -127,4 +127,87 @@ fn multi_round_self_mining_loopback_preserves_invariants() {
             "round {round}: vote totals diverged from recount after a networked insertion"
         );
     }
+}
+
+// N-3: a header relayed with a corrupt proof must not censor the genuine block.
+#[test]
+fn corrupt_proof_relay_does_not_censor_genuine_block() {
+    let params = fast_params(4);
+    let mut chain = PrismChain::new(params.clone());
+    let mut seen = SeenCache::new();
+
+    let genuine = mine_one(&chain, &params, 0);
+    let mut corrupt = genuine.clone();
+    assert!(!corrupt.parent_proof.0.is_empty());
+    corrupt.parent_proof.0[0].0 = H256::from([0xffu8; 32]);
+    // Same header => same hash.
+    assert_eq!(block_hash(&corrupt.header), block_hash(&genuine.header));
+
+    let bad = handle_announcement(BlockAnnouncement::Full(corrupt), &params, &mut seen, &mut chain);
+    assert!(bad.invalid && bad.to_gossip.is_empty());
+    assert!(seen.is_empty(), "invalid block must not enter the seen-cache");
+
+    let good = handle_announcement(BlockAnnouncement::Full(genuine), &params, &mut seen, &mut chain);
+    assert!(!good.invalid);
+    assert_eq!(good.to_gossip.len(), 1, "genuine block must still be accepted after the corrupt relay");
+}
+
+#[test]
+fn seen_cache_is_bounded_and_removable() {
+    let mut seen = SeenCache::with_capacity(3);
+    let h = |b: u8| H256::from([b; 32]);
+    for b in 1..=5u8 {
+        seen.insert(h(b));
+    }
+    assert_eq!(seen.len(), 3);
+    assert!(!seen.contains(&h(1)) && !seen.contains(&h(2)));
+    assert!(seen.contains(&h(5)));
+    seen.remove(&h(5));
+    assert!(!seen.contains(&h(5)));
+    assert_eq!(seen.len(), 2);
+}
+
+// N-2: oversized / duplicate / over-budget GetBlocks.
+#[test]
+fn get_blocks_rejects_oversized_requests() {
+    use crate::wire::{serve_get_blocks, MAX_GET_BLOCKS_HASHES};
+    let hashes: Vec<H256> =
+        (0..(MAX_GET_BLOCKS_HASHES as u64 + 1)).map(H256::from_low_u64_be).collect();
+    let mut lookups = 0;
+    let r = serve_get_blocks(hashes, |_| {
+        lookups += 1;
+        None
+    });
+    assert!(r.is_err());
+    assert_eq!(lookups, 0, "an oversized request must be rejected before touching the DB");
+    // 32k-hash attack shape.
+    let huge: Vec<H256> = (0..32_000u64).map(H256::from_low_u64_be).collect();
+    assert!(serve_get_blocks(huge, |_| None).is_err());
+}
+
+#[test]
+fn get_blocks_dedups_and_respects_byte_budget() {
+    use crate::wire::{serve_get_blocks, serve_get_blocks_with_budget};
+    let params = fast_params(4);
+    let mut chain = PrismChain::new(params.clone());
+    let mut blocks = Vec::new();
+    for round in 0..3u64 {
+        let b = mine_one(&chain, &params, round);
+        chain.insert_block(b.clone());
+        blocks.push(b);
+    }
+    let hashes: Vec<H256> = blocks.iter().map(|b| block_hash(&b.header)).collect();
+    let lookup = |h: &H256| blocks.iter().find(|b| block_hash(&b.header) == *h).cloned();
+
+    // Same hash 100x -> one block.
+    let dup = vec![hashes[0]; 100];
+    assert_eq!(serve_get_blocks(dup, lookup).unwrap().len(), 1);
+
+    // Budget of one block's size admits exactly one of the three.
+    let one = parity_scale_codec::Encode::encoded_size(&blocks[0]);
+    let out = serve_get_blocks_with_budget(hashes.clone(), lookup, one).unwrap();
+    assert_eq!(out.len(), 1);
+    // Ample budget returns all three, in request order.
+    let all = serve_get_blocks(hashes.clone(), lookup).unwrap();
+    assert_eq!(all.iter().map(|b| block_hash(&b.header)).collect::<Vec<_>>(), hashes);
 }
