@@ -1,0 +1,7 @@
+# O-1: pin the toolchain CI and local builds use. 1.97's rust-lld breaks the
+# runtime wasm link (see the Dockerfile's matching pin); bump only in
+# lockstep with the Dockerfile after verifying the wasm runtime still links.
+[toolchain]
+channel = "1.94.0"
+targets = ["wasm32-unknown-unknown"]
+components = ["rust-src"]

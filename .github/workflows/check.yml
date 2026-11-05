@@ -25,7 +25,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential clang libclang-dev protobuf-compiler pkg-config libssl-dev
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.94.0  # O-1: matches rust-toolchain.toml
         with:
           targets: wasm32-unknown-unknown
           components: rust-src
