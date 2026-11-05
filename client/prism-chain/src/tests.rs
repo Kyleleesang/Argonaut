@@ -201,22 +201,28 @@ fn voter_chain_linear_growth_matches_recount() {
 
 /// The central B1 acceptance scenario: a competing, longer voter-chain fork
 /// must roll back the abandoned segment's votes and apply the new segment's,
-/// ending in exact agreement with an independent recount.
+/// ending in exact agreement with an independent recount. (R-4b: both forks
+/// vote contiguously from level 1, so the competing fork votes for sibling
+/// proposers at the same levels.)
 #[test]
 fn voter_chain_reorg_rolls_back_and_reapplies_votes() {
     let mut chain = PrismChain::new(params());
     let proposer_genesis = chain.proposer_genesis;
     let voter_genesis0 = chain.voter_genesis[0];
 
-    let mut prop_hash = proposer_genesis;
-    let mut proposers = Vec::new();
-    for i in 0..4u64 {
-        let p = proposer_block(100 + i, prop_hash, vec![], vec![]);
-        prop_hash = block_hash(&p.header);
-        proposers.push(prop_hash);
-        chain.insert_block(p);
-    }
-    let (p1_hash, p2_hash, p3_hash, p4_hash) = (proposers[0], proposers[1], proposers[2], proposers[3]);
+    let p1 = proposer_block(100, proposer_genesis, vec![], vec![]);
+    let p1_hash = block_hash(&p1.header);
+    chain.insert_block(p1);
+    let p2 = proposer_block(101, p1_hash, vec![], vec![]);
+    let p2_hash = block_hash(&p2.header);
+    chain.insert_block(p2);
+    // Sibling proposers at levels 1 and 2.
+    let q1 = proposer_block(200, proposer_genesis, vec![], vec![]);
+    let q1_hash = block_hash(&q1.header);
+    chain.insert_block(q1);
+    let q2 = proposer_block(201, q1_hash, vec![], vec![]);
+    let q2_hash = block_hash(&q2.header);
+    chain.insert_block(q2);
 
     // Old fork: genesis -> a1 (votes p1) -> a2 (votes p2). Depth 2.
     let mut nonce = 0;
@@ -227,9 +233,9 @@ fn voter_chain_reorg_rolls_back_and_reapplies_votes() {
     assert_eq!(chain.votes.get(&p1_hash).map(|v| v.total()), Some(1));
     assert_eq!(chain.votes.get(&p2_hash).map(|v| v.total()), Some(1));
 
-    // Competing fork from genesis, longer: b1 (votes p3) -> b2 (votes p4) -> b3 (no votes).
-    let b1 = ins(&mut chain, voter_genesis0, vec![p3_hash], &mut nonce);
-    let b2 = ins(&mut chain, b1, vec![p4_hash], &mut nonce);
+    // Competing fork from genesis, longer: b1 (votes q1) -> b2 (votes q2) -> b3 (no votes).
+    let b1 = ins(&mut chain, voter_genesis0, vec![q1_hash], &mut nonce);
+    let b2 = ins(&mut chain, b1, vec![q2_hash], &mut nonce);
     let b3 = ins(&mut chain, b2, vec![], &mut nonce);
 
     // New fork (depth 3) should have won over the old one (depth 2).
@@ -239,14 +245,11 @@ fn voter_chain_reorg_rolls_back_and_reapplies_votes() {
     assert!(chain.votes.get(&p1_hash).is_none());
     assert!(chain.votes.get(&p2_hash).is_none());
     // New votes applied.
-    assert_eq!(chain.votes.get(&p3_hash).map(|v| v.total()), Some(1));
-    assert_eq!(chain.votes.get(&p4_hash).map(|v| v.total()), Some(1));
-
-    // p1/p2's levels should be unvoted again on chain 0; p3/p4's should not.
-    assert_eq!(chain.unvoted_levels[0].get(&1), Some(&p1_hash));
-    assert_eq!(chain.unvoted_levels[0].get(&2), Some(&p2_hash));
-    assert_eq!(chain.unvoted_levels[0].get(&3), None);
-    assert_eq!(chain.unvoted_levels[0].get(&4), None);
+    assert_eq!(chain.votes.get(&q1_hash).map(|v| v.total()), Some(1));
+    assert_eq!(chain.votes.get(&q2_hash).map(|v| v.total()), Some(1));
+    // R-4b: the (chain, level) index follows the canonical fork.
+    assert_eq!(chain.vote_index.get(&(0, 1)), Some(&(q1_hash, 1)));
+    assert_eq!(chain.vote_index.get(&(0, 2)), Some(&(q2_hash, 2)));
 
     assert_eq!(chain.vote_totals(), chain.recount_votes());
 }
@@ -281,21 +284,27 @@ fn reorg_on_one_chain_does_not_affect_another() {
 
 /// Longer scripted sequence: build, fork, reorg, extend, then reorg again from
 /// genesis with a third fork -- checking the recount invariant after every
-/// single insertion, not just at the end.
+/// single insertion, not just at the end. (R-4b: the forks vote contiguously
+/// from level 1 for two sibling proposer chains P and Q.)
 #[test]
 fn vote_totals_match_recount_after_every_insertion_in_a_long_scripted_sequence() {
     let mut chain = PrismChain::new(params());
     let proposer_genesis = chain.proposer_genesis;
     let voter_genesis0 = chain.voter_genesis[0];
 
-    let mut prop_hash = proposer_genesis;
-    let mut proposers = Vec::new();
-    for i in 0..6u64 {
-        let p = proposer_block(100 + i, prop_hash, vec![], vec![]);
-        prop_hash = block_hash(&p.header);
-        proposers.push(prop_hash);
-        chain.insert_block(p);
-    }
+    let build = |base: u64, chain: &mut PrismChain| {
+        let mut prop_hash = proposer_genesis;
+        let mut out = Vec::new();
+        for i in 0..6u64 {
+            let p = proposer_block(base + i, prop_hash, vec![], vec![]);
+            prop_hash = block_hash(&p.header);
+            out.push(prop_hash);
+            chain.insert_block(p);
+        }
+        out
+    };
+    let proposers = build(100, &mut chain);
+    let q = build(200, &mut chain);
 
     let mut nonce = 0u64;
     let a1 = ins(&mut chain, voter_genesis0, vec![proposers[0]], &mut nonce);
@@ -303,21 +312,21 @@ fn vote_totals_match_recount_after_every_insertion_in_a_long_scripted_sequence()
 
     // Competing fork from genesis, initially shorter (depth 1) -- must NOT
     // replace the tip or change vote totals yet.
-    let b1 = ins(&mut chain, voter_genesis0, vec![proposers[2]], &mut nonce);
+    let b1 = ins(&mut chain, voter_genesis0, vec![q[0]], &mut nonce);
     assert_eq!(chain.voter_tips[0].1, 2, "shorter fork must not replace the tip");
 
     // Extend b to depth 3 -- now longer than a, must reorg.
-    let b2 = ins(&mut chain, b1, vec![proposers[3]], &mut nonce);
-    let b3 = ins(&mut chain, b2, vec![proposers[4]], &mut nonce);
+    let b2 = ins(&mut chain, b1, vec![q[1]], &mut nonce);
+    let b3 = ins(&mut chain, b2, vec![q[2]], &mut nonce);
     assert_eq!(chain.voter_tips[0].1, 3);
     assert!(chain.votes.get(&proposers[0]).is_none());
     assert!(chain.votes.get(&proposers[1]).is_none());
-    assert_eq!(chain.votes.get(&proposers[2]).map(|v| v.total()), Some(1));
-    assert_eq!(chain.votes.get(&proposers[3]).map(|v| v.total()), Some(1));
-    assert_eq!(chain.votes.get(&proposers[4]).map(|v| v.total()), Some(1));
+    assert_eq!(chain.votes.get(&q[0]).map(|v| v.total()), Some(1));
+    assert_eq!(chain.votes.get(&q[1]).map(|v| v.total()), Some(1));
+    assert_eq!(chain.votes.get(&q[2]).map(|v| v.total()), Some(1));
 
     // Extend further, then a fresh, longer-still fork from genesis again.
-    let b4 = ins(&mut chain, b3, vec![proposers[5]], &mut nonce);
+    let b4 = ins(&mut chain, b3, vec![q[3]], &mut nonce);
     let _ = b4;
     let c1 = ins(&mut chain, voter_genesis0, vec![], &mut nonce);
     let c2 = ins(&mut chain, c1, vec![], &mut nonce);
@@ -327,9 +336,10 @@ fn vote_totals_match_recount_after_every_insertion_in_a_long_scripted_sequence()
 
     assert_eq!(chain.voter_tips[0].1, 5);
     // The whole b-fork's votes should now be gone; the c-fork cast none.
-    for p in &proposers {
+    for p in proposers.iter().chain(q.iter()) {
         assert!(chain.votes.get(p).is_none(), "all votes should be rolled back");
     }
+    assert!(chain.vote_index.is_empty());
     assert_eq!(chain.vote_totals(), chain.recount_votes());
 }
 
@@ -875,4 +885,155 @@ fn prune_uses_recorded_leader_and_skips_levels_without_one() {
     chain.prune(1_000_000, 1);
     assert!(db.get_block(&real_leader_hash).unwrap().is_none());
     assert!(db.get_block(&first_seen_hash).unwrap().is_some(), "first-seen non-leader must be kept");
+}
+
+// ---- R-4b: voter-block vote validity ----
+
+/// Three-level proposer chain; returns (chain, [p1, p2, p3]).
+fn chain_with_three_levels() -> (PrismChain, Vec<H256>) {
+    let mut chain = PrismChain::new(params());
+    let mut parent = chain.proposer_genesis;
+    let mut out = Vec::new();
+    for i in 0..3u64 {
+        let p = proposer_block(300 + i, parent, vec![], vec![]);
+        parent = block_hash(&p.header);
+        out.push(parent);
+        chain.insert_block(p);
+    }
+    (chain, out)
+}
+
+#[test]
+fn r4b_non_contiguous_votes_are_rejected() {
+    let (mut chain, p) = chain_with_three_levels();
+    let g = chain.voter_genesis[0];
+    // Starts at level 2 instead of 1.
+    let bad = voter_block(51, 0, g, vec![p[1]]);
+    let bad_hash = block_hash(&bad.header);
+    chain.insert_block(bad);
+    assert!(!chain.has_block(&bad_hash), "gap at the start must be rejected, not orphaned");
+    // Gap in the middle (levels 1 and 3).
+    let bad2 = voter_block(52, 0, g, vec![p[0], p[2]]);
+    let bad2_hash = block_hash(&bad2.header);
+    chain.insert_block(bad2);
+    assert!(!chain.has_block(&bad2_hash));
+    assert!(chain.votes.is_empty());
+    assert_eq!(chain.voter_tips[0].1, 0);
+}
+
+#[test]
+fn r4b_duplicate_level_votes_are_rejected() {
+    let mut chain = PrismChain::new(params());
+    let pg = chain.proposer_genesis;
+    let g = chain.voter_genesis[0];
+    let a = proposer_block(1, pg, vec![], vec![]);
+    let a_hash = block_hash(&a.header);
+    chain.insert_block(a);
+    let b = proposer_block(2, pg, vec![], vec![]); // sibling at level 1
+    let b_hash = block_hash(&b.header);
+    chain.insert_block(b);
+    // Double vote at one level (the split attack from the spec, scenario (a)).
+    let dbl = voter_block(51, 0, g, vec![a_hash, b_hash]);
+    let dbl_hash = block_hash(&dbl.header);
+    chain.insert_block(dbl);
+    assert!(!chain.has_block(&dbl_hash));
+    assert!(chain.votes.is_empty());
+    // Same proposer listed twice.
+    let twice = voter_block(52, 0, g, vec![a_hash, a_hash]);
+    let twice_hash = block_hash(&twice.header);
+    chain.insert_block(twice);
+    assert!(!chain.has_block(&twice_hash));
+}
+
+#[test]
+fn r4b_revote_of_an_already_voted_level_is_rejected_and_depth_does_not_reset() {
+    let (mut chain, p) = chain_with_three_levels();
+    let g = chain.voter_genesis[0];
+    let mut nonce = 0;
+    let v1 = ins(&mut chain, g, vec![p[0]], &mut nonce);
+    let depth_before = chain.votes[&p[0]].per_chain[&0];
+    assert_eq!(depth_before, 1);
+    // v2 re-votes level 1 (a stage-1 depth reset attempt).
+    let re = voter_block(577, 0, v1, vec![p[0]]);
+    let re_hash = block_hash(&re.header);
+    chain.insert_block(re);
+    assert!(!chain.has_block(&re_hash));
+    assert_eq!(chain.votes[&p[0]].per_chain[&0], depth_before);
+    assert_eq!(chain.vote_index.get(&(0, 1)), Some(&(p[0], 1)));
+    // Skipping ahead is also invalid; continuing at level 2 is fine.
+    let skip = voter_block(578, 0, v1, vec![p[2]]);
+    let skip_hash = block_hash(&skip.header);
+    chain.insert_block(skip);
+    assert!(!chain.has_block(&skip_hash));
+    ins(&mut chain, v1, vec![p[1], p[2]], &mut nonce);
+    assert_eq!(chain.voter_tips[0].1, 2);
+    assert_eq!(chain.vote_totals(), chain.recount_votes());
+}
+
+#[test]
+fn r4b_unknown_proposer_orphans_then_resolves_when_it_arrives() {
+    let mut chain = PrismChain::new(params());
+    let pg = chain.proposer_genesis;
+    let g = chain.voter_genesis[0];
+    let p1 = proposer_block(1, pg, vec![], vec![]);
+    let p1_hash = block_hash(&p1.header);
+    let v = voter_block(51, 0, g, vec![p1_hash]);
+    let v_hash = block_hash(&v.header);
+
+    let outcome = chain.insert_block(v);
+    assert_eq!(outcome.missing, vec![p1_hash]);
+    assert!(chain.orphans.contains_key(&v_hash));
+    assert_eq!(chain.orphan_missing_refs(), vec![p1_hash]);
+
+    chain.insert_block(p1);
+    assert!(!chain.orphans.contains_key(&v_hash), "voter block must drain once the proposer arrives");
+    assert_eq!(chain.voter_tips[0], (v_hash, 1));
+    assert_eq!(chain.votes.get(&p1_hash).map(|v| v.total()), Some(1));
+}
+
+#[test]
+fn r4b_voting_for_the_proposer_genesis_is_rejected() {
+    let mut chain = PrismChain::new(params());
+    let pg = chain.proposer_genesis;
+    let g = chain.voter_genesis[0];
+    let v = voter_block(51, 0, g, vec![pg]);
+    let h = block_hash(&v.header);
+    chain.insert_block(v);
+    assert!(!chain.has_block(&h));
+    assert!(chain.orphans.is_empty());
+}
+
+#[test]
+fn r4b_last_voted_level_survives_pruning_and_restart() {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let db = std::sync::Arc::new(PrismDb::open(dir.path()).expect("open PrismDb"));
+    let mut chain = PrismChain::with_db(params(), db.clone());
+    let mut parent = chain.proposer_genesis;
+    let mut props = Vec::new();
+    for i in 0..3u64 {
+        let p = proposer_block(400 + i, parent, vec![], vec![]);
+        parent = block_hash(&p.header);
+        props.push(parent);
+        chain.insert_block(p);
+    }
+    let mut nonce = 0;
+    let mut tip = chain.voter_genesis[0];
+    // 12 blocks: the first three each vote one new level, the rest are empty.
+    for i in 0..12usize {
+        let votes = if i < 3 { vec![props[i]] } else { vec![] };
+        tip = ins(&mut chain, tip, votes, &mut nonce);
+    }
+    chain.prune(4, 0); // frontier well past the voting blocks
+    let mut recovered = PrismChain::with_db(params(), db);
+    assert_eq!(recovered.voter_tips[0].0, tip);
+    // A child of the tip must still be judged against last_voted_level == 3:
+    // re-voting level 3 is rejected, an empty block is accepted.
+    let re = voter_block(9001, 0, tip, vec![props[2]]);
+    let re_hash = block_hash(&re.header);
+    recovered.insert_block(re);
+    assert!(!recovered.has_block(&re_hash));
+    let ok = voter_block(9002, 0, tip, vec![]);
+    let ok_hash = block_hash(&ok.header);
+    recovered.insert_block(ok);
+    assert!(recovered.has_block(&ok_hash));
 }

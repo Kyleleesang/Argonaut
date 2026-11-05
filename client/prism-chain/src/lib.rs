@@ -61,6 +61,11 @@ struct VoterMeta {
     depth: u64,
     /// Proposer hashes this block voted on (copied from its `BlockContent`).
     votes: Vec<H256>,
+    /// R-4b: highest proposer level this chain has voted on up to and
+    /// including this block. A child block's votes must cover exactly
+    /// `last_voted_level+1 ..= L`. Lives in the meta itself, so pruning
+    /// (which keeps the frontier block's meta) keeps it at the frontier.
+    last_voted_level: u64,
 }
 
 /// Lightweight per-proposer-block metadata.
@@ -117,6 +122,12 @@ pub struct PrismChain {
     /// its seen-cache and let a re-gossip actually be re-processed.
     evicted_orphans: Vec<H256>,
     voter_meta: HashMap<H256, VoterMeta>,
+    /// R-4b: `(chain, level) -> (proposer, depth)` of the vote currently
+    /// counted on that chain's canonical history. A later block can never
+    /// overwrite an existing entry (that was the re-vote depth-reset), and
+    /// `votes` stays the per-proposer view of the same data. Rebuilt from
+    /// `votes` + `proposer_meta` on checkpoint load.
+    vote_index: HashMap<(u16, u64), (H256, u64)>,
     proposer_meta: HashMap<H256, ProposerMeta>,
     db: Option<Arc<PrismDb>>,
     /// B-2: rolling-window difficulty retarget, fed one timestamp per
@@ -177,7 +188,8 @@ struct ChainCheckpoint {
     known_tx_blocks: Vec<H256>,
 }
 
-const CHAIN_CHECKPOINT_VERSION: u32 = 1;
+/// R-4b: bumped from 1 -- `VoterMeta` gained `last_voted_level`.
+const CHAIN_CHECKPOINT_VERSION: u32 = 2;
 
 /// How many accepted (non-replay) blocks pass between automatic checkpoints.
 /// The checkpoint is O(total live-window state), so writing it on every
@@ -206,7 +218,7 @@ impl PrismChain {
 
         let mut voter_meta = HashMap::new();
         for &g in &voter_genesis {
-            voter_meta.insert(g, VoterMeta { parent: g, depth: 0, votes: Vec::new() });
+            voter_meta.insert(g, VoterMeta { parent: g, depth: 0, votes: Vec::new(), last_voted_level: 0 });
         }
 
         let mut proposer_meta = HashMap::new();
@@ -230,6 +242,7 @@ impl PrismChain {
             orphan_order: VecDeque::new(),
             evicted_orphans: Vec::new(),
             voter_meta,
+            vote_index: HashMap::new(),
             proposer_meta,
             db: None,
             retarget: DifficultyRetarget::new(),
@@ -301,6 +314,7 @@ impl PrismChain {
             .ok()
             .flatten()
             .and_then(|bytes| ChainCheckpoint::decode(&mut &bytes[..]).ok())
+            .filter(|cp| cp.version == CHAIN_CHECKPOINT_VERSION)
         {
             chain.load_checkpoint(checkpoint);
         }
@@ -353,6 +367,15 @@ impl PrismChain {
         self.unreferenced_tx_blocks = cp.unreferenced_tx_blocks.into_iter().collect();
         self.unreferenced_proposers = cp.unreferenced_proposers.into_iter().collect();
         self.known_tx_blocks = cp.known_tx_blocks.into_iter().collect();
+        // R-4b: rebuild the (chain, level) vote index.
+        self.vote_index.clear();
+        for (proposer, info) in &self.votes {
+            if let Some(level) = self.proposer_meta.get(proposer).map(|m| m.level) {
+                for (&c, &d) in &info.per_chain {
+                    self.vote_index.insert((c, level), (*proposer, d));
+                }
+            }
+        }
     }
 
     /// Write a fresh `ChainCheckpoint` to `db` now, unconditionally. Called
@@ -509,18 +532,35 @@ impl PrismChain {
                 if self.voter_genesis.contains(voter_parent) && *voter_parent != self.voter_genesis[chain_idx] {
                     return outcome;
                 }
-                if !self.voter_meta.contains_key(voter_parent) {
-                    if self.is_pruned(voter_parent) {
-                        // The parent is gone for good (B5 pruning), not
-                        // merely not-yet-received -- orphaning this block
-                        // would leave it in `orphans` forever waiting on a
-                        // fetch that can never resolve. Reject outright.
-                        return outcome;
+                let parent_known = self.voter_meta.contains_key(voter_parent);
+                if !parent_known && self.is_pruned(voter_parent) {
+                    // The parent is gone for good (B5 pruning), not
+                    // merely not-yet-received -- orphaning this block
+                    // would leave it in `orphans` forever waiting on a
+                    // fetch that can never resolve. Reject outright.
+                    return outcome;
+                }
+                // R-4b: voted proposers must be known before the vote shape
+                // can be checked (their levels are looked up).
+                if votes.contains(&self.proposer_genesis) {
+                    return outcome;
+                }
+                let unknown: Vec<H256> =
+                    votes.iter().filter(|v| !self.proposer_meta.contains_key(v)).copied().collect();
+                if !parent_known || !unknown.is_empty() {
+                    if !parent_known {
+                        outcome.missing.push(*voter_parent);
                     }
-                    outcome.missing.push(*voter_parent);
+                    outcome.missing.extend(unknown);
                     self.insert_orphan(hash, block);
                 } else {
-                    self.insert_voter(hash, *chain, *voter_parent, votes.clone());
+                    let last = self.voter_meta[voter_parent].last_voted_level;
+                    let Some(new_last) = self.check_vote_shape(last, votes) else {
+                        // R-4b: non-contiguous / duplicate-level / re-vote.
+                        // Will never become valid; reject, don't orphan.
+                        return outcome;
+                    };
+                    self.insert_voter(hash, *chain, *voter_parent, votes.clone(), new_last);
                     self.persist(&block);
                     outcome.may_confirm = true;
                     self.observe_for_retarget(timestamp_ms);
@@ -533,6 +573,26 @@ impl PrismChain {
         // unresolvable dependency-resolution deadlocks.
         self.drain_orphans();
         outcome
+    }
+
+    /// R-4b: a voter block's `votes` (all proposers already known) must cover
+    /// exactly the levels `last+1 ..= last+n`, one proposer per level. Block
+    /// order in `votes` is by hash (`validate_block`), so levels are looked
+    /// up and sorted here. Returns the new `last_voted_level`, or `None` if
+    /// the shape is invalid (gap, duplicate level, or re-vote of an
+    /// already-voted level).
+    fn check_vote_shape(&self, last: u64, votes: &[H256]) -> Option<u64> {
+        let mut levels: Vec<u64> = Vec::with_capacity(votes.len());
+        for v in votes {
+            levels.push(self.proposer_meta.get(v)?.level);
+        }
+        levels.sort_unstable();
+        for (i, l) in levels.iter().enumerate() {
+            if *l != last + 1 + i as u64 {
+                return None;
+            }
+        }
+        Some(last + levels.len() as u64)
     }
 
     /// Record a newly-accepted proposer block: assign its level, and if it's
@@ -556,11 +616,11 @@ impl PrismChain {
     /// Record a newly-accepted voter block, then apply fork-choice: if it
     /// extends its chain past the current tip's depth, adopt it as the new
     /// tip and reconcile votes against whatever it's replacing.
-    fn insert_voter(&mut self, hash: H256, chain: ChainId, parent: H256, votes: Vec<H256>) {
+    fn insert_voter(&mut self, hash: H256, chain: ChainId, parent: H256, votes: Vec<H256>, last_voted_level: u64) {
         let chain_idx = chain as usize;
         let parent_depth = self.voter_meta.get(&parent).map(|m| m.depth).unwrap_or(0);
         let new_depth = parent_depth + 1;
-        self.voter_meta.insert(hash, VoterMeta { parent, depth: new_depth, votes });
+        self.voter_meta.insert(hash, VoterMeta { parent, depth: new_depth, votes, last_voted_level });
 
         let (tip_hash, tip_depth) = self.voter_tips[chain_idx];
         if new_depth > tip_depth {
@@ -619,6 +679,15 @@ impl PrismChain {
     }
 
     fn add_vote(&mut self, chain_idx: usize, proposer_hash: H256, depth: u64) {
+        // R-4b: one counted vote per (chain, level); never overwrite (the old
+        // `per_chain.insert` let a re-vote reset the depth).
+        if let Some(level) = self.proposer_meta.get(&proposer_hash).map(|m| m.level) {
+            if self.vote_index.contains_key(&(chain_idx as u16, level)) {
+                debug_assert!(false, "R-4b: duplicate vote for chain {chain_idx} level {level}");
+                return;
+            }
+            self.vote_index.insert((chain_idx as u16, level), (proposer_hash, depth));
+        }
         self.votes
             .entry(proposer_hash)
             .or_default()
@@ -630,6 +699,11 @@ impl PrismChain {
     }
 
     fn remove_vote(&mut self, chain_idx: usize, proposer_hash: H256) {
+        if let Some(level) = self.proposer_meta.get(&proposer_hash).map(|m| m.level) {
+            if self.vote_index.get(&(chain_idx as u16, level)).map(|(p, _)| *p) == Some(proposer_hash) {
+                self.vote_index.remove(&(chain_idx as u16, level));
+            }
+        }
         if let Some(info) = self.votes.get_mut(&proposer_hash) {
             info.per_chain.remove(&(chain_idx as u16));
             if info.per_chain.is_empty() {
@@ -677,8 +751,12 @@ impl PrismChain {
                         want(r, self.proposer_meta.contains_key(r), self);
                     }
                 }
-                BlockContent::Voter { voter_parent, .. } => {
+                BlockContent::Voter { voter_parent, votes, .. } => {
                     want(voter_parent, self.voter_meta.contains_key(voter_parent), self);
+                    // R-4b: voted proposers we don't have yet.
+                    for v in votes {
+                        want(v, self.proposer_meta.contains_key(v) || *v == self.proposer_genesis, self);
+                    }
                 }
                 BlockContent::Transaction { .. } => {}
             }
@@ -698,8 +776,13 @@ impl PrismChain {
                             && tx_refs.iter().all(|r| self.known_tx_blocks.contains(r))
                             && prop_refs.iter().all(|r| self.proposer_meta.contains_key(r))
                     }
-                    BlockContent::Voter { voter_parent, .. } => {
+                    BlockContent::Voter { voter_parent, votes, .. } => {
+                        // R-4b: also wait for every voted proposer (genesis is
+                        // never known; `insert_block` rejects it outright).
                         self.voter_meta.contains_key(voter_parent)
+                            && votes
+                                .iter()
+                                .all(|v| self.proposer_meta.contains_key(v) || *v == self.proposer_genesis)
                     }
                     BlockContent::Transaction { .. } => true,
                 };
