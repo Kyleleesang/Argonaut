@@ -211,3 +211,22 @@ fn get_blocks_dedups_and_respects_byte_budget() {
     let all = serve_get_blocks(hashes.clone(), lookup).unwrap();
     assert_eq!(all.iter().map(|b| block_hash(&b.header)).collect::<Vec<_>>(), hashes);
 }
+
+// N-6: a ref a peer failed to serve is not re-sent to it until the TTL lapses.
+#[test]
+fn cant_serve_cache_is_per_peer_and_expires() {
+    use crate::wire::{CantServe, CANT_SERVE_TTL};
+    use sc_network::PeerId;
+    use std::time::Instant;
+    let (a, b) = (PeerId::random(), PeerId::random());
+    let h = H256::from([7u8; 32]);
+    let mut c = CantServe::default();
+    let t0 = Instant::now();
+    assert!(!c.is_blocked(&a, &h, t0));
+    c.record(a, h, t0);
+    assert!(c.is_blocked(&a, &h, t0));
+    assert!(!c.is_blocked(&b, &h, t0), "other peers (e.g. the archive node) must still be asked");
+    assert!(!c.is_blocked(&a, &h, t0 + CANT_SERVE_TTL + std::time::Duration::from_secs(1)));
+    c.forget_peer(&a);
+    assert!(!c.is_blocked(&a, &h, t0));
+}

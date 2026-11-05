@@ -44,6 +44,45 @@ const REP_BAD_REQUEST: ReputationChange =
 const REP_INVALID_BLOCK: ReputationChange = ReputationChange::new(-(1 << 14), "prism: invalid block");
 const REP_TIMEOUT: ReputationChange = ReputationChange::new(-(1 << 8), "prism: sync request timeout");
 
+/// N-6: how long a hash a peer failed to serve stays in that peer's
+/// "can't serve" negative cache, and the per-peer cap on the cache.
+pub const CANT_SERVE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+pub const CANT_SERVE_CAP_PER_PEER: usize = 20_000;
+
+/// N-6: per-peer negative cache of hashes the peer was asked for and never
+/// delivered (e.g. history a `--prism-prune` peer dropped). Orphan-ancestor
+/// refs are not re-sent to a peer that recently failed to serve them, so a
+/// pruning peer isn't asked for ~1.6k hashes every 30s resync; they keep
+/// going to peers (e.g. the archive node) that haven't failed.
+#[derive(Default)]
+pub struct CantServe {
+    by_peer: HashMap<PeerId, HashMap<H256, std::time::Instant>>,
+}
+
+impl CantServe {
+    pub fn record(&mut self, peer: PeerId, h: H256, now: std::time::Instant) {
+        let m = self.by_peer.entry(peer).or_default();
+        if m.len() >= CANT_SERVE_CAP_PER_PEER && !m.contains_key(&h) {
+            m.retain(|_, t| now.duration_since(*t) < CANT_SERVE_TTL);
+            if m.len() >= CANT_SERVE_CAP_PER_PEER {
+                return;
+            }
+        }
+        m.insert(h, now);
+    }
+
+    pub fn is_blocked(&self, peer: &PeerId, h: &H256, now: std::time::Instant) -> bool {
+        self.by_peer
+            .get(peer)
+            .and_then(|m| m.get(h))
+            .map_or(false, |t| now.duration_since(*t) < CANT_SERVE_TTL)
+    }
+
+    pub fn forget_peer(&mut self, peer: &PeerId) {
+        self.by_peer.remove(peer);
+    }
+}
+
 /// N-2: answer a `GetBlocks`. `Err(())` = bad request (too many hashes).
 /// Dedups (order-preserving) and stops adding blocks once the encoded size
 /// would exceed `MAX_RESPONSE_BYTES`.
@@ -153,6 +192,8 @@ pub struct PrismNetworkWorker {
     confirmation_notify: Arc<tokio::sync::Notify>,
     seen: SeenCache,
     peers: HashSet<PeerId>,
+    /// N-6: see `CantServe`.
+    cant_serve: CantServe,
 }
 
 impl PrismNetworkWorker {
@@ -176,6 +217,7 @@ impl PrismNetworkWorker {
                 confirmation_notify,
                 seen: SeenCache::new(),
                 peers: HashSet::new(),
+                cant_serve: CantServe::default(),
             },
             mined_tx,
         )
@@ -291,9 +333,11 @@ impl PrismNetworkWorker {
     /// empty forever while the orphans' ancestors are still missing. The seed
     /// is therefore also extended with `PrismChain::orphan_missing_refs`.
     /// Because this runs on every 30s resync tick for every peer, an ancestor
-    /// a pruning peer can't serve (and `backfill` dropped after
-    /// `MAX_ROUNDS_MISSING`) is re-requested from every other peer (e.g. the
-    /// archive node) until it resolves.
+    /// is re-requested until it resolves -- but N-6: a ref a peer failed to
+    /// serve (`backfill` dropped it after `MAX_ROUNDS_MISSING`) goes into that
+    /// peer's `cant_serve` negative cache and is not re-sent to it for
+    /// `CANT_SERVE_TTL`, while peers that haven't failed (e.g. the archive
+    /// node) still get it every tick.
     async fn request_status_and_maybe_backfill(&mut self, peer: PeerId) {
         let request = SyncRequest::GetStatus.encode();
         let Some(response) = sync_request(&self.network, peer, request).await else { return };
@@ -314,7 +358,12 @@ impl PrismNetworkWorker {
                 .collect();
             let frontier_n = seed.len();
             let mut in_seed: HashSet<H256> = seed.iter().copied().collect();
+            let now = std::time::Instant::now();
             for h in chain.orphan_missing_refs() {
+                // N-6: skip refs this peer already failed to serve.
+                if self.cant_serve.is_blocked(&peer, &h, now) {
+                    continue;
+                }
                 if in_seed.insert(h) {
                     seed.push(h);
                 }
@@ -375,6 +424,8 @@ impl PrismNetworkWorker {
                     *retries += 1;
                     if *retries > MAX_ROUNDS_MISSING {
                         pending.remove(h);
+                        // N-6: this peer answered but never delivered `h`.
+                        self.cant_serve.record(peer, *h, std::time::Instant::now());
                     }
                 }
             }
@@ -424,6 +475,7 @@ impl PrismNetworkWorker {
                         NotificationEvent::NotificationStreamClosed { peer } => {
                             log::info!(target: "prism", "substream closed with {peer}");
                             self.peers.remove(&peer);
+                            self.cant_serve.forget_peer(&peer);
                         }
                         NotificationEvent::NotificationReceived { peer, notification } => {
                             if let Ok(announcement) = BlockAnnouncement::decode(&mut notification.as_slice()) {

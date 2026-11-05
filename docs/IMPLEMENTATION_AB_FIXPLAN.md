@@ -31,6 +31,8 @@ trackers were removed once their findings closed. Code comments that cite
 
 **Fix (being implemented).** Add `PrismChain::orphan_missing_refs()`, which returns the unresolved dependencies of every orphan, using the same readiness rules as `drain_orphans` and excluding anything known, orphaned or pruned. `request_status_and_maybe_backfill` adds these to its seed, so every 30s resync re-requests them from every peer until an archive peer serves them.
 
+**N-6 rework (done, unit-tested; live-verify pending).** `orphan_missing_refs` is kept, but the refs are no longer blindly resent to every peer. The worker keeps a per-peer "can't serve" negative cache (`wire::CantServe`, no `Status` wire change). When `backfill` drops a hash after `MAX_ROUNDS_MISSING` rounds from a peer that was reachable, the hash is recorded against that peer for `CANT_SERVE_TTL` (10 min, capped per peer, cleared when the peer disconnects). `request_status_and_maybe_backfill` skips orphan refs the peer is blocked for, so a pruning peer is not asked for ~1.6k hashes every 30s, while the archive node (which hasn't failed) still gets them every tick. Frontier-derived seeds are unaffected.
+
 **Acceptance:** repeat the 3-node run above; node3 must print `level N confirmed via stage-1` on its own and match the miners' finalized hash.
 
 ## B-11 real fix — difficulty retargeting: spec'd, implementation deliberately deferred
