@@ -80,7 +80,17 @@ substrate-build-script-utils = { git = "https://github.com/paritytech/polkadot-s
 
 [features]
 default = []
-runtime-benchmarks = ["argonaut-runtime/runtime-benchmarks"]
+# sc-service's feature forwards to sc-client-db, which gates the
+# `Backend::expose_db`/`expose_storage` that `command.rs`'s benchmark
+# subcommand calls; without it `--features runtime-benchmarks` doesn't compile.
+runtime-benchmarks = [
+	"argonaut-runtime/runtime-benchmarks",
+	"frame-benchmarking-cli/runtime-benchmarks",
+	"frame-benchmarking/runtime-benchmarks",
+	"frame-system/runtime-benchmarks",
+	"sc-service/runtime-benchmarks",
+	"sp-runtime/runtime-benchmarks",
+]
 try-runtime = ["argonaut-runtime/try-runtime"]
 # A-1: off by default so a plain `cargo build --release` (and therefore the
 # production wasm blob -- substrate-wasm-builder mirrors whatever features
