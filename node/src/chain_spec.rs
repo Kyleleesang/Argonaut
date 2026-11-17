@@ -142,6 +142,45 @@ pub fn prism_params_from_properties(properties: &sc_chain_spec::Properties) -> P
     }
 }
 
+/// D-5: sane ranges for the chain-spec consensus params. Out-of-range values
+/// silently break consensus (m=0 underflows sortition, k=0 confirms at zero
+/// depth, shift >= 256 yields zero difficulty), so startup hard-errors on them
+/// instead of running a neutered node.
+pub const MAX_M_VOTER_CHAINS: u16 = 1024;
+pub const MAX_DIFFICULTY_SHIFT: u32 = 250;
+pub const MAX_TARGET_INTERVAL_MS: u64 = 3_600_000;
+pub const MAX_K_DEEP_CONFIRMATION: u64 = 100_000;
+
+pub fn validate_prism_params(p: &PrismChainSpecParams) -> Result<(), String> {
+    fn range<T: PartialOrd + std::fmt::Display>(name: &str, v: T, lo: T, hi: T) -> Result<(), String> {
+        if v < lo || v > hi {
+            return Err(format!("chain spec property {name}={v} out of range [{lo}, {hi}]"));
+        }
+        Ok(())
+    }
+    use prism_property_keys::*;
+    range(M_VOTER_CHAINS, p.m_voter_chains, 1, MAX_M_VOTER_CHAINS)?;
+    range(DIFFICULTY_SHIFT, p.difficulty_shift, 0, MAX_DIFFICULTY_SHIFT)?;
+    range(TARGET_INTERVAL_MS, p.target_interval_ms, 1, MAX_TARGET_INTERVAL_MS)?;
+    range(K_DEEP_CONFIRMATION, p.k_deep_confirmation, 1, MAX_K_DEEP_CONFIRMATION)?;
+    // beta must stay below the paper's 0.5 safety limit.
+    range(BETA_PERCENT, p.beta_percent, 0, 49)?;
+    range(EPS_EXPONENT, p.eps_exponent, 1, 300)?;
+    Ok(())
+}
+
+/// D-5: pruning must keep at least `k_deep` levels of history, else confirmed
+/// state needed by the confirmation rule is dropped.
+pub fn validate_k_prune(k_prune: u64, p: &PrismChainSpecParams) -> Result<(), String> {
+    if k_prune < p.k_deep_confirmation {
+        return Err(format!(
+            "--prism-k-prune={k_prune} must be >= k_deep_confirmation={}",
+            p.k_deep_confirmation
+        ));
+    }
+    Ok(())
+}
+
 pub fn get_from_seed<TPublic: Public>(seed: &str) -> <TPublic::Pair as Pair>::Public {
     TPublic::Pair::from_string(&format!("//{}", seed), None)
         .expect("static values are valid; qed")
@@ -277,6 +316,33 @@ mod tests {
         assert_eq!(read_back.k_deep_confirmation, defaults.k_deep_confirmation);
         assert_eq!(read_back.beta_percent, defaults.beta_percent);
         assert_eq!(read_back.eps_exponent, defaults.eps_exponent);
+    }
+
+    // D-5: out-of-range params are rejected.
+    #[test]
+    fn out_of_range_params_are_rejected() {
+        assert!(validate_prism_params(&PrismChainSpecParams::default()).is_ok());
+        let d = PrismChainSpecParams::default();
+        for bad in [
+            PrismChainSpecParams { m_voter_chains: 0, ..d.clone() },
+            PrismChainSpecParams { m_voter_chains: u16::MAX, ..d.clone() },
+            PrismChainSpecParams { difficulty_shift: 256, ..d.clone() },
+            PrismChainSpecParams { target_interval_ms: 0, ..d.clone() },
+            PrismChainSpecParams { k_deep_confirmation: 0, ..d.clone() },
+            PrismChainSpecParams { beta_percent: 50, ..d.clone() },
+            PrismChainSpecParams { eps_exponent: 0, ..d.clone() },
+            PrismChainSpecParams { eps_exponent: 301, ..d.clone() },
+        ] {
+            let e = validate_prism_params(&bad).unwrap_err();
+            assert!(e.contains("out of range"), "{e}");
+        }
+    }
+
+    #[test]
+    fn k_prune_must_cover_k_deep() {
+        let d = PrismChainSpecParams::default();
+        assert!(validate_k_prune(d.k_deep_confirmation, &d).is_ok());
+        assert!(validate_k_prune(d.k_deep_confirmation - 1, &d).is_err());
     }
 
     /// An explicit override actually takes effect (not just "defaults always

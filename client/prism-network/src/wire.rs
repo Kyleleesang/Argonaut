@@ -12,7 +12,7 @@
 //! protocol configs, generic over `N: NetworkBackend` so it works with either
 //! network backend (`NetworkWorker`/libp2p or `Litep2pNetworkBackend`) the node
 //! is started with.
-use crate::{handle_announcement, BlockAnnouncement, SyncRequest, SyncResponse};
+use crate::{handle_announcement, BlockAnnouncement, SeenCache, SyncRequest, SyncResponse};
 use argonaut_primitives_prism::{block_hash, H256};
 use argonaut_prism_chain::PrismChain;
 use argonaut_prism_db::PrismDb;
@@ -22,11 +22,101 @@ use sc_network::{
         IncomingRequest, NonReservedPeerMode, NotificationService, OutgoingResponse, SetConfig,
     },
     service::traits::{NetworkBackend, NetworkService as NetworkServiceTrait, NotificationEvent, ValidationResult},
-    IfDisconnected, NetworkRequest, NotificationMetrics, PeerId, ProtocolName,
+    IfDisconnected, NetworkRequest, NotificationMetrics, PeerId, ProtocolName, ReputationChange,
+    RequestFailure,
 };
 use futures::FutureExt;
 use sp_runtime::traits::Block as BlockT;
 use std::collections::{HashMap, HashSet};
+
+/// N-2: max hashes honoured in one `GetBlocks`. Honest callers send at most 64
+/// (`backfill`'s BATCH); a ~32k-hash request could otherwise make us
+/// allocate ~1 GB of blocks.
+pub const MAX_GET_BLOCKS_HASHES: usize = 128;
+/// N-2: byte budget for one `Blocks` response (the protocol's response limit
+/// is 16 MiB; leave headroom for the SCALE envelope).
+pub const MAX_RESPONSE_BYTES: usize = 12 * 1024 * 1024;
+
+/// N-2: reputation costs. Small relative to sc-network's ban threshold so a
+/// single glitch doesn't ban a peer, but repeat offenders do.
+const REP_BAD_REQUEST: ReputationChange =
+    ReputationChange::new(-(1 << 12), "prism: malformed or oversized sync request");
+const REP_INVALID_BLOCK: ReputationChange = ReputationChange::new(-(1 << 14), "prism: invalid block");
+const REP_TIMEOUT: ReputationChange = ReputationChange::new(-(1 << 8), "prism: sync request timeout");
+
+/// N-6: how long a hash a peer failed to serve stays in that peer's
+/// "can't serve" negative cache, and the per-peer cap on the cache.
+pub const CANT_SERVE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+pub const CANT_SERVE_CAP_PER_PEER: usize = 20_000;
+
+/// N-6: per-peer negative cache of hashes the peer was asked for and never
+/// delivered (e.g. history a `--prism-prune` peer dropped). Orphan-ancestor
+/// refs are not re-sent to a peer that recently failed to serve them, so a
+/// pruning peer isn't asked for ~1.6k hashes every 30s resync; they keep
+/// going to peers (e.g. the archive node) that haven't failed.
+#[derive(Default)]
+pub struct CantServe {
+    by_peer: HashMap<PeerId, HashMap<H256, std::time::Instant>>,
+}
+
+impl CantServe {
+    pub fn record(&mut self, peer: PeerId, h: H256, now: std::time::Instant) {
+        let m = self.by_peer.entry(peer).or_default();
+        if m.len() >= CANT_SERVE_CAP_PER_PEER && !m.contains_key(&h) {
+            m.retain(|_, t| now.duration_since(*t) < CANT_SERVE_TTL);
+            if m.len() >= CANT_SERVE_CAP_PER_PEER {
+                return;
+            }
+        }
+        m.insert(h, now);
+    }
+
+    pub fn is_blocked(&self, peer: &PeerId, h: &H256, now: std::time::Instant) -> bool {
+        self.by_peer
+            .get(peer)
+            .and_then(|m| m.get(h))
+            .map_or(false, |t| now.duration_since(*t) < CANT_SERVE_TTL)
+    }
+
+    pub fn forget_peer(&mut self, peer: &PeerId) {
+        self.by_peer.remove(peer);
+    }
+}
+
+/// N-2: answer a `GetBlocks`. `Err(())` = bad request (too many hashes).
+/// Dedups (order-preserving) and stops adding blocks once the encoded size
+/// would exceed `MAX_RESPONSE_BYTES`.
+pub fn serve_get_blocks(
+    hashes: Vec<H256>,
+    get: impl FnMut(&H256) -> Option<argonaut_primitives_prism::PrismBlock>,
+) -> Result<Vec<argonaut_primitives_prism::PrismBlock>, ()> {
+    serve_get_blocks_with_budget(hashes, get, MAX_RESPONSE_BYTES)
+}
+
+pub(crate) fn serve_get_blocks_with_budget(
+    hashes: Vec<H256>,
+    mut get: impl FnMut(&H256) -> Option<argonaut_primitives_prism::PrismBlock>,
+    budget: usize,
+) -> Result<Vec<argonaut_primitives_prism::PrismBlock>, ()> {
+    if hashes.len() > MAX_GET_BLOCKS_HASHES {
+        return Err(());
+    }
+    let mut uniq = HashSet::new();
+    let mut out = Vec::new();
+    let mut bytes = 0usize;
+    for h in hashes {
+        if !uniq.insert(h) {
+            continue;
+        }
+        let Some(block) = get(&h) else { continue };
+        bytes = bytes.saturating_add(parity_scale_codec::Encode::encoded_size(&block));
+        if bytes > budget {
+            break;
+        }
+        out.push(block);
+    }
+    Ok(out)
+}
 use std::sync::{Arc, Mutex};
 
 /// Build the `/argonaut/prism/blocks/1` notification protocol config + its
@@ -100,8 +190,10 @@ pub struct PrismNetworkWorker {
     /// instead of waiting out a fixed poll interval. Shared with (constructed
     /// by) the caller, which also hands the same `Arc` to the bridge.
     confirmation_notify: Arc<tokio::sync::Notify>,
-    seen: HashSet<H256>,
+    seen: SeenCache,
     peers: HashSet<PeerId>,
+    /// N-6: see `CantServe`.
+    cant_serve: CantServe,
 }
 
 impl PrismNetworkWorker {
@@ -123,8 +215,9 @@ impl PrismNetworkWorker {
                 chain,
                 db,
                 confirmation_notify,
-                seen: HashSet::new(),
+                seen: SeenCache::new(),
                 peers: HashSet::new(),
+                cant_serve: CantServe::default(),
             },
             mined_tx,
         )
@@ -146,6 +239,9 @@ impl PrismNetworkWorker {
         if missing.is_empty() {
             return;
         }
+        // N-2: stay under the server's per-request hash cap.
+        let mut missing = missing;
+        missing.truncate(MAX_GET_BLOCKS_HASHES);
         let request = SyncRequest::GetBlocks(missing).encode();
         let Some(response) = sync_request(&self.network, from, request).await else { return };
         let Ok(SyncResponse::Blocks(blocks)) = SyncResponse::decode(&mut response.as_slice()) else {
@@ -173,6 +269,11 @@ impl PrismNetworkWorker {
             let params = chain.params.clone();
             handle_announcement(announcement, &params, &mut self.seen, &mut chain)
         };
+        if outcome.invalid {
+            if let Some(peer) = source {
+                self.network.report_peer(peer, REP_INVALID_BLOCK);
+            }
+        }
         if outcome.may_confirm {
             // AF-1: wake the bridge immediately rather than making it wait
             // out its own poll interval -- `notify_one` stores a permit if
@@ -194,24 +295,27 @@ impl PrismNetworkWorker {
         }
     }
 
-    fn answer_sync_request(&self, payload: &[u8]) -> Result<Vec<u8>, ()> {
-        match SyncRequest::decode(&mut &payload[..]).map_err(|_| ())? {
+    /// N-2: also returns the reputation changes to apply to the requester.
+    fn answer_sync_request(&self, payload: &[u8]) -> (Result<Vec<u8>, ()>, Vec<ReputationChange>) {
+        let Ok(request) = SyncRequest::decode(&mut &payload[..]) else {
+            return (Err(()), vec![REP_BAD_REQUEST]);
+        };
+        match request {
             SyncRequest::GetBlocks(hashes) => {
-                let blocks = hashes
-                    .into_iter()
-                    .filter_map(|h| self.db.get_block(&h).ok().flatten())
-                    .collect();
-                Ok(SyncResponse::Blocks(blocks).encode())
+                match serve_get_blocks(hashes, |h| self.db.get_block(h).ok().flatten()) {
+                    Ok(blocks) => (Ok(SyncResponse::Blocks(blocks).encode()), Vec::new()),
+                    Err(()) => (Err(()), vec![REP_BAD_REQUEST]),
+                }
             }
             SyncRequest::GetStatus => {
                 let chain = self.chain.lock().expect("PrismChain mutex poisoned");
-                Ok(SyncResponse::Status {
+                (Ok(SyncResponse::Status {
                     proposer_best_level: chain.proposer_best_level,
                     voter_tips: chain.voter_tips.iter().map(|(h, _)| *h).collect(),
                     unreferenced_proposers: chain.unreferenced_proposers.iter().copied().collect(),
                     unreferenced_tx_blocks: chain.unreferenced_tx_blocks.iter().copied().collect(),
                 }
-                .encode())
+                .encode()), Vec::new())
             }
         }
     }
@@ -229,9 +333,11 @@ impl PrismNetworkWorker {
     /// empty forever while the orphans' ancestors are still missing. The seed
     /// is therefore also extended with `PrismChain::orphan_missing_refs`.
     /// Because this runs on every 30s resync tick for every peer, an ancestor
-    /// a pruning peer can't serve (and `backfill` dropped after
-    /// `MAX_ROUNDS_MISSING`) is re-requested from every other peer (e.g. the
-    /// archive node) until it resolves.
+    /// is re-requested until it resolves -- but N-6: a ref a peer failed to
+    /// serve (`backfill` dropped it after `MAX_ROUNDS_MISSING`) goes into that
+    /// peer's `cant_serve` negative cache and is not re-sent to it for
+    /// `CANT_SERVE_TTL`, while peers that haven't failed (e.g. the archive
+    /// node) still get it every tick.
     async fn request_status_and_maybe_backfill(&mut self, peer: PeerId) {
         let request = SyncRequest::GetStatus.encode();
         let Some(response) = sync_request(&self.network, peer, request).await else { return };
@@ -252,7 +358,12 @@ impl PrismNetworkWorker {
                 .collect();
             let frontier_n = seed.len();
             let mut in_seed: HashSet<H256> = seed.iter().copied().collect();
+            let now = std::time::Instant::now();
             for h in chain.orphan_missing_refs() {
+                // N-6: skip refs this peer already failed to serve.
+                if self.cant_serve.is_blocked(&peer, &h, now) {
+                    continue;
+                }
                 if in_seed.insert(h) {
                     seed.push(h);
                 }
@@ -313,6 +424,8 @@ impl PrismNetworkWorker {
                     *retries += 1;
                     if *retries > MAX_ROUNDS_MISSING {
                         pending.remove(h);
+                        // N-6: this peer answered but never delivered `h`.
+                        self.cant_serve.record(peer, *h, std::time::Instant::now());
                     }
                 }
             }
@@ -362,6 +475,7 @@ impl PrismNetworkWorker {
                         NotificationEvent::NotificationStreamClosed { peer } => {
                             log::info!(target: "prism", "substream closed with {peer}");
                             self.peers.remove(&peer);
+                            self.cant_serve.forget_peer(&peer);
                         }
                         NotificationEvent::NotificationReceived { peer, notification } => {
                             if let Ok(announcement) = BlockAnnouncement::decode(&mut notification.as_slice()) {
@@ -372,10 +486,10 @@ impl PrismNetworkWorker {
                 }
                 request = self.sync_requests.recv().fuse() => {
                     let Ok(IncomingRequest { payload, pending_response, .. }) = request else { return };
-                    let result = self.answer_sync_request(&payload);
+                    let (result, reputation_changes) = self.answer_sync_request(&payload);
                     let _ = pending_response.send(OutgoingResponse {
                         result,
-                        reputation_changes: Vec::new(),
+                        reputation_changes,
                         sent_feedback: None,
                     });
                 }
@@ -433,6 +547,11 @@ async fn sync_request(
     );
     match rx.await {
         Ok(Ok((response, _))) => Some(response),
+        // N-2: only a timeout is the peer's fault; unreachable/refused isn't.
+        Ok(Err(RequestFailure::Network(sc_network::request_responses::OutboundFailure::Timeout))) => {
+            network.report_peer(peer, REP_TIMEOUT);
+            None
+        }
         _ => None,
     }
 }

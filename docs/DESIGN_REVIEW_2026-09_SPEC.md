@@ -97,7 +97,7 @@ Three reviewers found this independently.
   - Pruning keeps `last_voted_level` at the frontier.
   - Honest miners must already produce votes of this shape; verify that first.
 
-**Effort:** 4a about 1 h; 4b 2–3 days. **Status:** OPEN.
+**Effort:** 4a about 1 h; 4b 2–3 days. **Status:** 4b DONE (unit-tested; live-verify pending).
 
 ### R-5 — Pruning drops the first-seen proposer, not the confirmed leader; BuildLedger skips missing bodies silently — HIGH
 **Flaw:** `prune_confirmed_bodies` (`prism-chain/src/lib.rs:~919`) treats `level_proposer[level]` as the leader. `build_ledger_delta_for_leader` / `expand_proposer_tx_refs` skip missing bodies (`if let Ok(Some(..))`, `prism-ledger/src/lib.rs:245,278`), and the leader timestamp falls back to `unwrap_or(0)` (`:216`).
@@ -178,7 +178,7 @@ Three reviewers found this independently.
 - Put the genesis hash in the protocol names.
 - Enforce `k_prune ≥ max(k_deep, reorg bound)`.
 
-**Effort:** 2–3 days. The range validation is cheap and can go now. **Status:** OPEN.
+**Effort:** 2–3 days. The range validation is cheap and can go now. **Status:** range validation DONE (unit-tested; live-verify pending: `validate_prism_params`, `validate_k_prune`); genesis-hash binding, protocol names, missing-key hard-error and difficulty-mismatch refusal still OPEN.
 
 ### D-6 — The equal 1/(m+2) block-type split caps throughput at ~0.35 tx/s and puts confirmation at ~19 min — HIGH — DECISION
 **Flaw:** `f_v = f_t = f_p = difficulty/(m+2)` (`primitives/prism/src/lib.rs:84-91`), so only 1 in 102 mined blocks carries transactions. The plans quote "~seconds" (guide §5), ~70k tx/s and point-of-sale use (dApp catalog), and short inclusion times (frontend).
@@ -239,11 +239,11 @@ Blocks carry no justification, so verifying Prism confirmation needs the full 10
 | ID | Sev | Flaw → fix | Status |
 |---|---|---|---|
 | **N-1** | HIGH | **Flaw:** the Prism network worker is one `select!` loop that awaits remote round-trips inline, with a 20 s timeout (`prism-network/src/wire.rs:341-393`). One slow or Sybil peer freezes all gossip and sync serving. **Fix:** spawn fetch/backfill tasks with per-peer concurrency limits and feed results back over a channel. | OPEN |
-| **N-2** | HIGH | **Flaw:** `GetBlocks` has no cap on hash count and no dedup (`wire.rs:199-205`): one ~32k-hash request can make a peer allocate about 1 GB. `reputation_changes` is always empty and every substream is accepted. **Fix:** cap at 128 hashes, dedup, apply a byte budget to the response, and add reputation penalties for invalid blocks, bad requests and timeouts. | OPEN |
-| **N-3** | MED-HIGH | **Flaw:** `seen.insert` runs *before* `validate_block` (`prism-network/src/lib.rs:85-93`). A header relayed with a corrupt proof censors the genuine block for the rest of the process's life, and evicted orphans can never be re-fetched. `seen` is also unbounded. **Fix:** insert only after the block validates, remove on orphan eviction, and make it an LRU. | OPEN |
+| **N-2** | HIGH | **Flaw:** `GetBlocks` has no cap on hash count and no dedup (`wire.rs:199-205`): one ~32k-hash request can make a peer allocate about 1 GB. `reputation_changes` is always empty and every substream is accepted. **Fix:** cap at 128 hashes, dedup, apply a byte budget to the response, and add reputation penalties for invalid blocks, bad requests and timeouts. | DONE (unit-tested; live-verify pending) |
+| **N-3** | MED-HIGH | **Flaw:** `seen.insert` runs *before* `validate_block` (`prism-network/src/lib.rs:85-93`). A header relayed with a corrupt proof censors the genuine block for the rest of the process's life, and evicted orphans can never be re-fetched. `seen` is also unbounded. **Fix:** insert only after the block validates, remove on orphan eviction, and make it an LRU. | DONE (unit-tested; live-verify pending) |
 | **N-4** | HIGH (suspected) | **Flaw:** `drain_orphans ↔ insert_block` recurses, and each drain scans the whole orphan map (`prism-chain/src/lib.rs:521,632-711`). During tip-first backfill this is O(n²) with deep recursion, a possible stack overflow. FIFO eviction also evicts tips first. **Fix:** an iterative worklist plus a missing-dependency → waiters index. Confirm the overflow with a reverse-inserted 5k-block voter chain test. | OPEN |
 | **N-5** | HIGH (suspected) | **Flaw:** BuildLedger costs O(history) per level and recurses O(history) deep. The proposer `parent` is never removed from `unreferenced_proposers` (`prism-chain/src/lib.rs:468-471`), so a `prop_refs` chain runs back to genesis. `expand_proposer_tx_refs` (`prism-ledger/src/lib.rs:269-288`) recurses with a fresh `visited` set and reads from the DB. Suspected stack overflow on archive nodes around level 10⁴. **Fix:** a durable already-ledgered set and an iterative walk, or treat the parent as referenced (as in the paper). Confirm with a 20k-level test. | OPEN |
-| **N-6** | — | **B-18 rework.** Keep `orphan_missing_refs`, but route those refs only to peers that can serve them: advertise `pruned_below`/archive status in `Status`, or keep a per-peer "can't serve" negative cache. Don't resend about 1.6k hashes to every pruning peer every 30 s. Blocked on R-1/R-2. | OPEN |
+| **N-6** | — | **B-18 rework.** Keep `orphan_missing_refs`, but route those refs only to peers that can serve them: advertise `pruned_below`/archive status in `Status`, or keep a per-peer "can't serve" negative cache. Don't resend about 1.6k hashes to every pruning peer every 30 s. Blocked on R-1/R-2. | DONE (unit-tested; live-verify pending) |
 | **N-7** | LOW | **Flaw:** `proposers_at_level`/`leader_at_level` scan all of `proposer_meta` and rebuild `vote_totals()` (`prism-chain/src/lib.rs:759-783`), and stage-2 costs O(P²·depth·m) per wakeup. **Fix:** a level → proposers index. | OPEN |
 | **N-8** | LOW | **Flaw:** the header's `difficulty` is miner-declared and never compared against `params` (`primitives/prism/src/lib.rs:394`). Harmless today because the sortition ranges enforce the real threshold. **Fix:** compare it to the params, and to the epoch value once B-11 lands. | OPEN |
 | **N-9** | LOW | **Flaw:** `PrismDb` lives outside the per-chain database directory. `purge-chain` doesn't delete it, and a rebuilt chain then diverges. Switching `--chain` on the same base path panics on the genesis `assert_eq!`. **Fix:** keep it under the chain directory, purge it with the chain, and replace the assert with a clean error. | OPEN |
